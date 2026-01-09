@@ -367,6 +367,14 @@ Bot.prototype.handleMessage = function (notice) {
         return;
     }
 
+    // [Fix] Notification Filter Logic
+    // If mentionString is set, we must strictly filter notifications too.
+    var noticeText = notice.getText();
+    if (this.mentionString && noticeText.indexOf(this.mentionString) === -1) {
+        console.log("Notification ignored: Msg=[" + noticeText + "] does not contain mention string [" + this.mentionString + "]");
+        return;
+    }
+
     // [Lock Acquire]
     this.isBusy = true;
     try {

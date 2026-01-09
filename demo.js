@@ -12,14 +12,14 @@ const bot = new Bot();
 // 1. 白名单配置 (统一管理)
 // 只有在这个列表里的会话，机器人的一级轮询才会点击进入，二级插件才会进行回复。
 // 建议填入精准的好友昵称或群名。
-const WHITELIST = ["Tink", "hhh"]; // 例如 ["文件传输助手", "技术交流群"]
+const WHITELIST = []; // 例如 ["文件传输助手", "技术交流群"]
 
 // 2. 插件配置
 bot.register(new OpenAIBot({
     apiKey: "", // 请替换为你自己的 API Key
     baseUrl: "", // 支持自定义 Base URL
     model: "gpt", // 支持自定义模型
-    contextTimeout: 20 * 60 * 1000, // 上下文记忆超时时间 (毫秒)，默认 2 小时
+    contextTimeout: 20 * 60 * 1000, // 上下文记忆超时时间 (毫秒)，默认 20 分钟
     whitelist: WHITELIST, // 引用上方统一配置
     blacklist: []  // 黑名单
 }));
@@ -29,5 +29,5 @@ bot.start({
     polling: true,      // 开启轮询
     interval: 500,     // 轮询间隔 2秒
     whitelist: WHITELIST, // 引用上方统一配置
-    mentionString: "@毛豆豆" // [群聊优化] 必须 @机器人 名字才回复。例如 "@Tink"。留空则对所有白名单消息回复。
+    mentionString: "" // [群聊优化] 必须 @机器人 名字才回复。例如 "@Tink"。留空则对所有白名单消息回复。
 });

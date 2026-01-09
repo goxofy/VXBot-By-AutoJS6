@@ -113,6 +113,11 @@ OpenAIBot.prototype.handle = function (ctx) {
         try {
             press(ctx.headRect.centerX(), ctx.headRect.centerY(), 800);
             sleep(800); // Wait for "@User " to appear
+
+            // [Optimization] Dismiss keyboard explicitly
+            console.log("Dismissing keyboard...");
+            back();
+            sleep(500);
         } catch (e) {
             console.log("Long click failed: " + e);
         }

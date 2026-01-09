@@ -26,18 +26,7 @@ function getAllDescs(item) {
     return descs;
 }
 
-function dumpObject(obj, prefix) {
-    if (!obj) return;
-    prefix = prefix || "";
-    try {
-        console.log(prefix + "Clazz: " + obj.className() + ", Text: " + obj.text() + ", Desc: " + obj.desc() + ", Bounds: " + obj.bounds());
-        if (obj.childCount && obj.childCount() > 0) {
-            for (var i = 0; i < obj.childCount(); i++) {
-                dumpObject(obj.child(i), prefix + "  ");
-            }
-        }
-    } catch (e) { console.log(prefix + "Error dumping: " + e); }
-}
+
 
 function Bot() {
     this.plugins = [];
@@ -59,6 +48,10 @@ Bot.prototype.start = function (config) {
     this.polling = config.polling || false;
     this.interval = config.interval || 5000;
     this.whitelist = config.whitelist || [];
+    this.mentionString = config.mentionString || ""; // If set, only reply when message contains this string
+
+    // [Lock] Initialize Busy Flag
+    this.isBusy = false;
 
     console.log("Bot started. Polling: " + this.polling + ", Interval: " + this.interval);
 
@@ -88,6 +81,13 @@ Bot.prototype.start = function (config) {
 
                         // Filter and Process
                         for (var i = 0; i < unreads.length; i++) {
+                            // [Lock Check] If busy (e.g. handling notification), wait.
+                            // Though in single-thread loop this is less likely, but good for safety if we add async later.
+                            if (self.isBusy) {
+                                console.log("Bot is busy (locked). Skipping poll cycle.");
+                                break;
+                            }
+
                             var item = unreads[i];
 
                             // console.log("DEBUG: Dumping Unread Item [" + i + "] structure:");
@@ -169,31 +169,87 @@ Bot.prototype.start = function (config) {
                                 matchTarget = "All Allowed";
                             }
 
+                            // Check for "[有人@我]" tag
+                            var isAtMe = false;
+                            for (var c = 0; c < allContent.length; c++) {
+                                if (allContent[c].indexOf("有人@我") > -1) {
+                                    isAtMe = true;
+                                    break;
+                                }
+                            }
+
                             if (isAllowed) {
-                                console.log(">> Enter whitelist session. Matched: " + matchTarget + ", Name: " + matchName);
+                                console.log(">> Enter whitelist session. Matched: " + matchTarget + ", Name: " + matchName + ", AtMe: " + isAtMe);
                                 var rect = item.bounds();
                                 // [Safety] Ensure we are clicking a row, not the whole screen/list
                                 if (rect.height() > 600) {
                                     console.log("Error: Item bounds too large (" + rect.height() + "), likely detected whole list. Aborting click.");
                                 } else {
-                                    click(rect.centerX(), rect.centerY());
-                                    sleep(1000); // Wait enter
 
-                                    // Process inside chat
-                                    self.handlePollingChat(matchName);
+                                    // [Lock Acquire]
+                                    self.isBusy = true;
+                                    try {
+                                        click(rect.centerX(), rect.centerY());
+                                        sleep(1000); // Wait enter
 
-                                    // Return to list
-                                    vchat.finish();
-                                    sleep(1000);
+                                        // Process inside chat
+                                        self.handlePollingChat(matchName, isAtMe);
 
-                                    // [Robustness] Break loop to re-scan. 
-                                    // After returning from chat, UI objects in 'unreads' might be stale.
-                                    // Let the next poll cycle handle the remaining messages.
-                                    break;
+                                        // Return to list
+                                        vchat.finish();
+                                        sleep(1000);
+
+                                        // [Robustness] Break loop to re-scan. 
+                                        // After returning from chat, UI objects in 'unreads' might be stale.
+                                        // Let the next poll cycle handle the remaining messages.
+                                        break;
+                                    } catch (e) {
+                                        console.error("Error in polling execution: " + e);
+                                        // Try to recover home if stuck
+                                        vchat.finish();
+                                    } finally {
+                                        // [Lock Release]
+                                        self.isBusy = false;
+                                    }
                                 }
                             } else {
                                 console.log("-- Ignored (Not in whitelist)");
                             }
+                        }
+                    }
+                } else if (vchat.isChat()) {
+                    // [Fix] Handle case where Bot is already inside a chat window
+                    // This covers cases where notification opened chat directly OR bot got stuck
+                    if (!self.isBusy) {
+                        var currentTitle = vchat.getTitle();
+                        console.log("Detected inside chat: " + currentTitle);
+
+                        var isAllowed = false;
+                        if (self.whitelist.length > 0) {
+                            for (var w = 0; w < self.whitelist.length; w++) {
+                                if (currentTitle.indexOf(self.whitelist[w]) > -1) {
+                                    isAllowed = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            isAllowed = true;
+                        }
+
+                        if (isAllowed) {
+                            console.log(">> Inside whitelist session. Processing...");
+                            self.isBusy = true;
+                            try {
+                                self.handlePollingChat(currentTitle, false);
+                            } catch (e) {
+                                console.error("Error in in-chat processing: " + e);
+                            } finally {
+                                vchat.finish();
+                                self.isBusy = false;
+                            }
+                        } else {
+                            console.log("Inside non-whitelist chat. Exiting...");
+                            vchat.finish();
                         }
                     }
                 }
@@ -206,7 +262,7 @@ Bot.prototype.start = function (config) {
     setInterval(function () { }, 10000);
 };
 
-Bot.prototype.handlePollingChat = function (title) {
+Bot.prototype.handlePollingChat = function (title, isAtMe) {
     // Check if we are in chat
     if (!vchat.isChat()) {
         console.log("Warning: Not in chat view after click. Current context might be wrong.");
@@ -215,74 +271,147 @@ Bot.prototype.handlePollingChat = function (title) {
         // return; 
     }
 
-    // Read latest message
-    var msgObj = vchat.getLatestMessage();
-    if (msgObj) {
-        console.log("Latest msg: " + msgObj.text);
+    // Read recent messages (Batch Processing)
+    // Fix: If multiple messages arrived, we should read them all (up to Self).
+    var msgs = vchat.getRecentMessages();
+    if (msgs && msgs.length > 0) {
+        // Use the last message for Metadata (Sender, Avatar)
+        var msgObj = msgs[msgs.length - 1];
 
-        var context = {
-            isPolling: true,
-            text: msgObj.text,
-            sender: title,
-            vchat: vchat
-        };
+        // [Filter Logic]
+        // If strict mention is required, filter out messages that don't match.
+        // Unless it's a private chat (Title ~= Sender).
+        var isPrivateChat = (title === msgObj.sender || title.indexOf(msgObj.sender) > -1 || msgObj.sender.indexOf(title) > -1);
 
-        // Dispatch
-        var handled = false;
-        for (var i = 0; i < this.plugins.length; i++) {
-            var plugin = this.plugins[i];
-            try {
-                if (plugin.handle(context)) {
-                    handled = true;
-                    // Wait for typical network/UI delay after sending
-                    sleep(2000);
-                    break;
-                }
-            } catch (e) {
-                console.error("Plugin error: " + e);
+        if (!isPrivateChat && this.mentionString) {
+            var originalCount = msgs.length;
+            msgs = msgs.filter(function (m) {
+                return m.text.indexOf(this.mentionString) > -1;
+            }.bind(this));
+
+            if (msgs.length < originalCount) {
+                console.log("Filtered batch from " + originalCount + " to " + msgs.length + " (Strict Mention)");
             }
         }
+
+        if (msgs.length === 0) {
+            console.log("Ignored: No messages match mention string in batch.");
+            return;
+        }
+
+        // [Multi-User Grouping Logic]
+        // Bucket Sort messages by Sender to ensure each user gets a specific reply.
+        var buckets = {};
+        for (var i = 0; i < msgs.length; i++) {
+            var m = msgs[i];
+            if (!buckets[m.sender]) {
+                buckets[m.sender] = [];
+            }
+            buckets[m.sender].push(m);
+        }
+
+        console.log("Processing " + Object.keys(buckets).length + " unique senders in batch.");
+
+        // Iterate Senders
+        for (var senderName in buckets) {
+            var senderMsgs = buckets[senderName];
+            var lastMsg = senderMsgs[senderMsgs.length - 1]; // Use last msg for headRect
+            var combinedDetails = senderMsgs.map(function (m) { return m.text; }).join("\n");
+
+            console.log(">> Processing for Sender [" + senderName + "]: " + combinedDetails);
+
+            // Calculate clean text (remove mention string)
+            var cleanText = combinedDetails;
+            if (this.mentionString) {
+                // Global remove of mention string
+                cleanText = cleanText.split(this.mentionString).join("").trim();
+            }
+
+            var context = {
+                isPolling: true,
+                text: cleanText, // Use clean text
+                sender: title, // Session Name (Group Name or Nickname)
+                user: senderName, // Actual Sender Name (e.g. "Tink")
+                headRect: lastMsg.headRect, // Avatar bounds for real mention
+                vchat: vchat
+            };
+
+            // Dispatch to plugins
+            for (var j = 0; j < this.plugins.length; j++) {
+                var plugin = this.plugins[j];
+                try {
+                    if (plugin.handle(context)) {
+                        // Wait for typical network/UI delay after sending
+                        // Note: If multiple senders, we need this sleep to separate replies.
+                        sleep(1000);
+                        break;
+                    }
+                } catch (e) {
+                    console.error("Plugin error: " + e);
+                }
+            }
+        }
+
+        // End of batch processing
+        return;
+
     } else {
         console.log("No friend message found (or only self messages).");
     }
 };
 
 Bot.prototype.handleMessage = function (notice) {
-    // Prepare context
-    var context = {
-        notice: notice,
-        vchat: vchat,
-        text: notice.getText()
-    };
+    // [Lock Check]
+    if (this.isBusy) {
+        console.log("Bot is busy (locked). Ignoring notification: " + notice.getText());
+        return;
+    }
 
-    console.log("Opening App...");
-    vchat.openApp();
+    // [Lock Acquire]
+    this.isBusy = true;
+    try {
+        // Prepare context
+        var context = {
+            notice: notice,
+            vchat: vchat,
+            text: notice.getText()
+        };
 
-    console.log("Opening Unread Session...");
-    if (vchat.openUnreadSession()) {
-        console.log("Entered session successfully.");
-        var handled = false;
-        for (var i = 0; i < this.plugins.length; i++) {
-            var plugin = this.plugins[i];
-            try {
-                console.log("Plugin " + plugin.name + " processing...");
-                if (plugin.handle(context)) {
-                    console.log("Plugin " + plugin.name + " handled the message.");
-                    handled = true;
-                    break;
+        console.log("Opening App...");
+        vchat.openApp();
+
+        console.log("Opening Unread Session...");
+        if (vchat.openUnreadSession()) {
+            console.log("Entered session successfully.");
+            var handled = false;
+            for (var i = 0; i < this.plugins.length; i++) {
+                var plugin = this.plugins[i];
+                try {
+                    console.log("Plugin " + plugin.name + " processing...");
+                    if (plugin.handle(context)) {
+                        console.log("Plugin " + plugin.name + " handled the message.");
+                        handled = true;
+                        break;
+                    }
+                } catch (e) {
+                    console.error("Plugin implementation error: " + e);
                 }
-            } catch (e) {
-                console.error("Plugin implementation error: " + e);
             }
-        }
 
-        if (!handled) {
-            console.log("No plugin handled this message.");
-        }
+            if (!handled) {
+                console.log("No plugin handled this message.");
+            }
 
-        vchat.finish();
-    } else {
-        console.log("Failed to open unread session (or no unread found).");
+            vchat.finish();
+        } else {
+            console.log("Failed to open unread session (or no unread found).");
+        }
+    } catch (err) {
+        console.error("Error in notification handler: " + err);
+    } finally {
+        // [Lock Release]
+        this.isBusy = false;
+        console.log("Notification lock released.");
     }
 };
 

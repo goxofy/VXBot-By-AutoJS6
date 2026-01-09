@@ -66,15 +66,25 @@ OpenAIBot.prototype.handle = function (ctx) {
 
     // 2. Context Management
     var now = new Date().getTime();
-    if (!this.contexts[sessionName]) {
-        this.contexts[sessionName] = {
+
+    // [Group Chat Optimization] Use composite key: Session + User
+    // This ensures that in a group, UserA's context is separate from UserB's.
+    var contextKey = sessionName;
+    if (ctx.user) {
+        contextKey = sessionName + "_" + ctx.user;
+    }
+
+    console.log("Context Key: " + contextKey);
+
+    if (!this.contexts[contextKey]) {
+        this.contexts[contextKey] = {
             history: [{ role: "system", content: this.config.systemPrompt }],
             lastActive: now,
             lastInput: "" // Dedupe
         };
     }
 
-    var userContext = this.contexts[sessionName];
+    var userContext = this.contexts[contextKey];
 
     // Check timeout
     if (now - userContext.lastActive > this.config.contextTimeout) {
@@ -95,10 +105,31 @@ OpenAIBot.prototype.handle = function (ctx) {
     userContext.lastInput = text;
     userContext.history.push({ role: "user", content: text });
 
-    // 3. Call OpenAI API
+    // 3. Pre-emptively Trigger Mention (Handling UI Shift Risk)
+    // We trigger the mention BEFORE calling the API, so we target the correct avatar location immediately.
+    var prefixText = "";
+    if (ctx.user && ctx.sender !== ctx.user && ctx.headRect) {
+        console.log("Triggering Real Mention (Long Click Avatar) PRE-API...");
+        try {
+            press(ctx.headRect.centerX(), ctx.headRect.centerY(), 800);
+            sleep(800); // Wait for "@User " to appear
+        } catch (e) {
+            console.log("Long click failed: " + e);
+        }
+    } else if (ctx.user && ctx.sender !== ctx.user) {
+        // Fallback if no headRect found (unlikely) -> append text later
+        prefixText = "@" + ctx.user + " ";
+    }
+
+    // 4. Call OpenAI API
     try {
         var responseText = this.callOpenAI(userContext.history);
         if (responseText) {
+            // Apply Manual Prefix Fallback if needed
+            if (prefixText) {
+                responseText = prefixText + responseText;
+            }
+
             ctx.vchat.sendText(responseText);
             userContext.history.push({ role: "assistant", content: responseText });
             return true;

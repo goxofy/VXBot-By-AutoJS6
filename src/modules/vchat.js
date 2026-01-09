@@ -74,11 +74,6 @@ export default {
      * 
      * @returns UICollect | null
      */
-    /**
-     * 获取底部 Tabs
-     * 
-     * @returns UICollect | null
-     */
     getTabs() {
         // 尝试在常用 depth 范围内查找包含所有Tab关键字的层级
         // 微信底部Tab关键字: 微信, 通讯录, 发现, 我
@@ -482,51 +477,8 @@ export default {
         return false
     },
 
-    /**
-                    }
-                        let menu = text(menuName).findOnce();
-     
-                        // 如果找不到精准匹配，尝试模糊匹配（兼容部分版本文案差异）
-                        if (!menu) {
-                            menu = textContains(enable ? "置顶" : "取消置顶").findOnce();
-                        }
-     
-                        if (menu) {
-                            menu.click();
-                            return true;
-                        } else {
-                        }
-     
-                        if (del) {
-                            del.click();
-                            sleep(random(500, 1000));
-     
-                            // 处理确认弹窗
-                            let ok = text("知道了").findOnce();
-                            if (ok) {
-                                ok.click();
-                                sleep(random(500, 1000));
-                            }
-                            let confirm = text("删除").findOnce();
-                            if (confirm) {
-                                confirm.click();
-                                return true;
-                            }
-                        } else {
-                            click(device.width / 2, device.height / 2);
-                        }
-                        // 操作完毕，退出循环
-                        return false;
-                    }
-                }
-            }
-        }
-        back();
-        return false;
-    },
-     
-     
-     
+
+
     /**
      * 退出群聊
      * 
@@ -668,7 +620,14 @@ export default {
             // sleep(200)
 
             // 设置文本
-            input.setText(content);
+            // [Fix] Append mode to support pre-existing @mention text
+            let currentText = input.text();
+            if (currentText && currentText.length > 0) {
+                // Ensure space separation if needed, though WeChat usually adds space after @User
+                input.setText(currentText + content);
+            } else {
+                input.setText(content);
+            }
             sleep(500); // 等待发送按钮出现
 
             // 3. 查找发送按钮
@@ -894,6 +853,44 @@ export default {
     },
 
     /**
+     * 获取当前聊天窗口标题
+     * 
+     * @returns string
+     */
+    getTitle() {
+        // 策略1: 查找“返回”按钮旁边的文本
+        let backBtn = desc("返回").findOnce();
+        if (backBtn) {
+            let parent = backBtn.parent();
+            if (parent) {
+                // 遍历同级节点
+                let views = parent.find(className("TextView"));
+                for (let i = 0; i < views.size(); i++) {
+                    let t = views.get(i).text();
+                    // 排除空文本和数字（通常是未读数）
+                    if (t && t.length > 0 && !t.match(/^\d+$/)) {
+                        return t;
+                    }
+                }
+            }
+        }
+
+        // 策略2: 顶部区域扫描
+        let titleView = className("TextView").boundsInside(0, 0, device.width, 200).find();
+        for (let i = 0; i < titleView.size(); i++) {
+            let t = titleView.get(i).text();
+            // 排除系统状态栏时间等
+            if (t && t.length > 0 && !t.match(/^\d+:\d+$/) && t !== "微信") {
+                // 排除 "返回" 文本本身（如果有）
+                if (t === "返回") continue;
+                return t;
+            }
+        }
+
+        return "Unknown";
+    },
+
+    /**
      * 获取聊天消息
      * 
      * @returns [MessageObject]
@@ -948,6 +945,73 @@ export default {
      * 获取聊天界面最后一条有效的对方消息
      * @returns {object|null} { text: string, type: string, sender: string }
      */
+    /**
+     * 获取当前会话中，自上一条“自己发的消息”之后的所有好友消息 (批量)
+     * @returns {Array} List of message objects
+     */
+    getRecentMessages() {
+        // Fix: Scan RelativeLayout
+        let allItems = className("RelativeLayout").find();
+        let messages = [];
+
+        if (!allItems.empty()) {
+            // 从下往上找
+            for (let i = allItems.size() - 1; i >= 0; i--) {
+                let item = allItems.get(i);
+
+                // 找头像
+                let head = item.findOne(className("ImageView").descContains("头像"));
+                if (!head) continue;
+
+                // 判断头像位置
+                let headRect = head.bounds();
+                let isSelf = headRect.left > device.width / 2;
+
+                if (isSelf) {
+                    // 遇到自己发的消息，停止扫描 (认为之前的都已处理或不相关)
+                    break;
+                }
+
+                // 是朋友的消息，提取内容
+                let tv = null;
+                let tvs = item.find(className("TextView"));
+
+                let startIndex = 0;
+                if (tvs.size() > 1) {
+                    let firstText = tvs.get(0).text();
+                    let headDesc = head.desc();
+                    if (headDesc.indexOf(firstText) > -1 || firstText.length < headDesc.length) {
+                        startIndex = 1;
+                    }
+                }
+
+                for (let j = startIndex; j < tvs.size(); j++) {
+                    let t = tvs.get(j);
+                    if (t.bounds().height() > 20 && t.text().length > 0) {
+                        tv = t;
+                        break;
+                    }
+                }
+
+                if (tv) {
+                    let senderName = head.desc();
+                    if (senderName.indexOf("头像") > -1) {
+                        senderName = senderName.replace("头像", "");
+                    }
+
+                    // 插入到数组开头 (保持时间顺序: 旧 -> 新)
+                    messages.unshift({
+                        text: tv.text(),
+                        sender: senderName,
+                        rect: item.bounds(),
+                        headRect: head.bounds()
+                    });
+                }
+            }
+        }
+        return messages;
+    },
+
     getLatestMessage() {
         // 重写逻辑: 扫描 RelativeLayout
         let allItems = className("RelativeLayout").find();
@@ -971,8 +1035,23 @@ export default {
                 // 找内容
                 let tv = null;
                 let tvs = item.find(className("TextView"));
+
+                // [Fix] In group chats, the first TextView might be the user's nickname.
+                // We try to identify the actual message body.
+                let startIndex = 0;
+                if (tvs.size() > 1) {
+                    let firstText = tvs.get(0).text();
+                    let headDesc = head.desc(); // e.g. "Tink头像"
+                    // Simple fuzzy check: if header desc includes the text of the first view, likely it is the nickname
+                    if (headDesc.indexOf(firstText) > -1 || firstText.length < headDesc.length) {
+                        // Heuristic: If we have multiple texts, and the first one is short/similar to avatar, skip it.
+                        // But usually nickname is small.
+                        startIndex = 1;
+                    }
+                }
+
                 // 过滤掉时间 (通常很小)
-                for (let j = 0; j < tvs.size(); j++) {
+                for (let j = startIndex; j < tvs.size(); j++) {
                     let t = tvs.get(j);
                     // 气泡内的文字通常在这个 Item 的中间区域
                     if (t.bounds().height() > 20 && t.text().length > 0) {
@@ -982,10 +1061,17 @@ export default {
                 }
 
                 if (tv) {
+                    let senderName = head.desc();
+                    // Clean up "头像" suffix if present
+                    if (senderName.indexOf("头像") > -1) {
+                        senderName = senderName.replace("头像", "");
+                    }
+
                     lastFriendMsg = {
                         text: tv.text(),
-                        sender: head.desc().replace("头像", ""),
-                        rect: item.bounds()
+                        sender: senderName,
+                        rect: item.bounds(),
+                        headRect: head.bounds() // Export avatar bounds for long-click mention
                     };
                     break;
                 }

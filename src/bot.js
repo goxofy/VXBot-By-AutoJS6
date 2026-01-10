@@ -53,13 +53,13 @@ Bot.prototype.start = function (config) {
     // [Lock] Initialize Busy Flag
     this.isBusy = false;
 
-    console.log("Bot started. Polling: " + this.polling + ", Interval: " + this.interval);
+    // console.log("Bot started. Polling: " + this.polling + ", Interval: " + this.interval);
 
     var self = this;
 
     // 1. Notification Listener (Still active for quick response if notifications are on)
     vchat.onMessage(function (notice) {
-        console.log("Notification received: " + notice.getText());
+        // console.log("Notification received: " + notice.getText());
         threads.start(function () {
             self.handleMessage(notice);
         });
@@ -70,6 +70,16 @@ Bot.prototype.start = function (config) {
         threads.start(function () {
             while (true) {
                 // Main Loop
+
+                // [Feature] Respect User's Tab
+                // If user is on Contacts/Discover/Me, do not disturb.
+                var currentTab = vchat.getCurrentTab();
+                if (currentTab > 0) {
+                    // console.log("User is on Tab " + currentTab + " (non-WeChat), skipping poll cycle.");
+                    sleep(self.interval);
+                    continue;
+                }
+
                 // Use getSessionList directly which is more robust than isHome() tab detection
                 var sessionList = vchat.getSessionList();
                 // Ensure we are not in a chat (avoid false positives)
@@ -77,14 +87,14 @@ Bot.prototype.start = function (config) {
                     // console.log("Polling...");
                     var unreads = vchat.getUnreadSession();
                     if (unreads && unreads.length > 0) {
-                        console.log("Found " + unreads.length + " unread sessions.");
+                        // console.log("Found " + unreads.length + " unread sessions.");
 
                         // Filter and Process
                         for (var i = 0; i < unreads.length; i++) {
                             // [Lock Check] If busy (e.g. handling notification), wait.
                             // Though in single-thread loop this is less likely, but good for safety if we add async later.
                             if (self.isBusy) {
-                                console.log("Bot is busy (locked). Skipping poll cycle.");
+                                // console.log("Bot is busy (locked). Skipping poll cycle.");
                                 break;
                             }
 
@@ -135,7 +145,7 @@ Bot.prototype.start = function (config) {
                                 }
                             }
 
-                            console.log("Unread Session [" + i + "] Content: " + allContent.join(", "));
+                            // console.log("Unread Session [" + i + "] Content: " + allContent.join(", "));
 
                             var isAllowed = false;
                             // Pick the best name (skip digits, time)
@@ -213,7 +223,7 @@ Bot.prototype.start = function (config) {
                                     }
                                 }
                             } else {
-                                console.log("-- Ignored (Not in whitelist)");
+                                // console.log("-- Ignored (Not in whitelist)");
                             }
                         }
                     }
@@ -367,13 +377,8 @@ Bot.prototype.handleMessage = function (notice) {
         return;
     }
 
-    // [Fix] Notification Filter Logic
-    // If mentionString is set, we must strictly filter notifications too.
-    var noticeText = notice.getText();
-    if (this.mentionString && noticeText.indexOf(this.mentionString) === -1) {
-        console.log("Notification ignored: Msg=[" + noticeText + "] does not contain mention string [" + this.mentionString + "]");
-        return;
-    }
+    // [Fix] Removed strict filter here. We filter inside the chat context.
+
 
     // [Lock Acquire]
     this.isBusy = true;
@@ -391,6 +396,51 @@ Bot.prototype.handleMessage = function (notice) {
         console.log("Opening Unread Session...");
         if (vchat.openUnreadSession()) {
             console.log("Entered session successfully.");
+
+            // [Fix] Context Check Logic
+            // Determine if it is Private or Group, and apply Mention Filter ONLY to Group.
+            // [Fix] Wait for Chat UI to load (Retry Loop)
+            var msgs = [];
+            for (var retry = 0; retry < 5; retry++) {
+                sleep(1000);
+                msgs = vchat.getRecentMessages();
+                if (msgs && msgs.length > 0) {
+                    break;
+                }
+                console.log("Waiting for messages... " + (retry + 1));
+            }
+
+            if (!msgs || msgs.length === 0) {
+                console.log("Error: Could not read chat messages after entering session. Aborting to avoid spam.");
+                vchat.finish();
+                return;
+            }
+
+            // [Fix] Context Check Logic
+            // Determine if it is Private or Group, and apply Mention Filter ONLY to Group.
+            // msgs is guaranteed to be non-empty here.
+            var lastMsg = msgs[msgs.length - 1];
+            var sessionTitle = vchat.getTitle();
+
+            // Logic: Private Chat if Title contains Sender or vice versa
+            var isPrivateChat = (sessionTitle === lastMsg.sender || sessionTitle.indexOf(lastMsg.sender) > -1 || lastMsg.sender.indexOf(sessionTitle) > -1);
+
+            console.log("Context Check: Title=" + sessionTitle + ", Sender=" + lastMsg.sender + ", IsPrivate=" + isPrivateChat);
+
+            if (!isPrivateChat && this.mentionString) {
+                // Check if content implies mention (either in notice text or last msg text)
+                var noticeText = notice.getText();
+                if (noticeText.indexOf(this.mentionString) === -1 && lastMsg.text.indexOf(this.mentionString) === -1) {
+                    console.log("Ignored Group Message: Msg does not contain mention string [" + this.mentionString + "]");
+                    vchat.finish();
+                    return;
+                }
+            }
+            // Update context text to use screen text which is more accurate/complete
+            context.text = lastMsg.text;
+            context.sender = sessionTitle;
+            context.user = lastMsg.sender;
+
             var handled = false;
             for (var i = 0; i < this.plugins.length; i++) {
                 var plugin = this.plugins[i];

@@ -38,6 +38,17 @@ export default {
             if (this.isHome()) {
                 return true
             }
+
+            // [Fix] Smart Tab Switching
+            // If we are on other tabs (Contacts/Discover/Me), simply click WeChat Tab (0)
+            let currentTab = this.getCurrentTab();
+            if (currentTab > 0) {
+                // console.log("BackToHome: Current is Tab " + currentTab + ", clicking Tab 0.");
+                if (this.setCurrentTab(0)) {
+                    continue; // Wait for loop to confirm isHome()
+                }
+            }
+
             back()
         }
         return false
@@ -987,10 +998,21 @@ export default {
 
                 for (let j = startIndex; j < tvs.size(); j++) {
                     let t = tvs.get(j);
-                    if (t.bounds().height() > 20 && t.text().length > 0) {
-                        tv = t;
-                        break;
+                    let txt = t.text();
+
+                    // Filter empty or too small views
+                    if (t.bounds().height() <= 20 || txt.length === 0) continue;
+
+                    // [Fix] Filter Timestamp
+                    // Timestamps like "上午11:44", "昨天 12:30", "2023年1月1日"
+                    // Regex: starts with date/time keywords or matches strict time patterns
+                    if (/^((凌晨|上午|下午|晚上|昨天|今天|明天|周|星期)?\s?\d{1,2}:\d{2}|^\d{2,4}[年/-]\d{1,2}[月/-]\d{1,2})/.test(txt)) {
+                        // console.log("Ignored timestamp-like text: " + txt);
+                        continue;
                     }
+
+                    tv = t;
+                    break;
                 }
 
                 if (tv) {

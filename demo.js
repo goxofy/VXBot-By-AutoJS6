@@ -34,5 +34,5 @@ bot.start({
     polling: true,      // 开启轮询
     interval: 500,     // 轮询间隔 2秒
     whitelist: WHITELIST, // 引用上方统一配置
-    mentionString: "" // [群聊优化] 必须 @机器人 名字才回复。例如 "@BOT"。留空则对所有白名单消息回复。
+    mentionString: "" // [群聊优化] 必须 @机器人 名字才回复。例如 "@Tink"。留空则对所有白名单消息回复。
 });

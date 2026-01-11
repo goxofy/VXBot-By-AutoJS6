@@ -998,18 +998,35 @@ export default {
 
                 for (let j = startIndex; j < tvs.size(); j++) {
                     let t = tvs.get(j);
-                    let txt = t.text();
+                    let txt = t.text().trim();
 
                     // Filter empty or too small views
                     if (t.bounds().height() <= 20 || txt.length === 0) continue;
 
+
+
                     // [Fix] Filter Timestamp
-                    // Timestamps like "上午11:44", "昨天 12:30", "2023年1月1日"
-                    // Regex: starts with date/time keywords or matches strict time patterns
-                    if (/^((凌晨|上午|下午|晚上|昨天|今天|明天|周|星期)?\s?\d{1,2}:\d{2}|^\d{2,4}[年/-]\d{1,2}[月/-]\d{1,2})/.test(txt)) {
-                        // console.log("Ignored timestamp-like text: " + txt);
+                    // 1. Strict Pure Time: "12:00", " 12:00 ", "12:00"
+                    if (/^\s*\d{1,2}:\d{2}\s*$/.test(txt)) continue;
+
+                    if (/^((凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|深夜|半夜|昨天|今天|明天|周|星期).*?\d{1,2}:\d{2}|^\d{2,4}[年\.\/-]\d{1,2}[月\.\/-]\d{1,2})/.test(txt)) {
                         continue;
                     }
+
+                    // [Fix] Filter Sender Name (Aggressive)
+                    // If the text is exactly the sender's name (minus "头像" suffix), ignore it.
+                    let senderName = head.desc().replace("头像", "");
+                    if (txt === senderName || senderName.indexOf(txt) > -1) {
+                        console.log("Ignored sender name text: " + txt);
+                        continue;
+                    }
+
+                    // [Fix] Filter Quoted Text (Reference)
+                    // WeChat quotes usually look like:
+                    // "To user: message..." (English)
+                    // "引用 old_msg : current_msg" (Sometimes separate TextViews?)
+                    // If it's a small gray text above the main message, it might be a quote.
+                    // For now, let's assume filtering Nickname is enough for "Tink".
 
                     tv = t;
                     break;

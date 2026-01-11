@@ -440,6 +440,8 @@ Bot.prototype.handleMessage = function (notice) {
             context.text = lastMsg.text;
             context.sender = sessionTitle;
             context.user = lastMsg.sender;
+            context.headRect = lastMsg.headRect;
+            context.isPrivate = isPrivateChat;
 
             var handled = false;
             for (var i = 0; i < this.plugins.length; i++) {

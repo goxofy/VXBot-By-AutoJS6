@@ -25,7 +25,7 @@ ImageBot.prototype.downloadImage = function (url) {
     if (!url) return null;
     console.log("ImageBot: Downloading " + url);
     try {
-        var img = http.get(url).body.bytes();
+        var img = http.get(url, { timeout: 30000 }).body.bytes();
         // Save to DCIM/Camera so it appears in album easily
         // Note: files.getSdcardPath() usually returns /sdcard
         var dir = "/sdcard/DCIM/Camera/";
@@ -53,8 +53,27 @@ ImageBot.prototype.handle = function (ctx) {
     if (text.indexOf("发图") > -1) {
         console.log("ImageBot: 收到发图指令");
 
-        // 1. Send tip
-        ctx.vchat.sendText("正在寻找美图，请稍候...");
+        // 1. Send tip with mention (Group only)
+        var replyPrefix = "";
+        if (!ctx.isPrivate && ctx.user) {
+            // Try long click avatar first
+            if (ctx.headRect) {
+                try {
+                    console.log("ImageBot: Triggering Long Click Mention...");
+                    press(ctx.headRect.centerX(), ctx.headRect.centerY(), 800);
+                    sleep(800); // Wait for @Name to appear
+                    back(); // Dismiss keyboard
+                    sleep(500);
+                } catch (e) {
+                    console.error("ImageBot: Long click failed, falling back to text mention.");
+                    replyPrefix = "@" + ctx.user + " ";
+                }
+            } else {
+                replyPrefix = "@" + ctx.user + " ";
+            }
+        }
+
+        ctx.vchat.sendText(replyPrefix + "正在寻找美图，请稍候...");
 
         // 2. Fetch & Download
         var imgUrl = this.getRandomImage();
@@ -66,6 +85,14 @@ ImageBot.prototype.handle = function (ctx) {
 
                 // 3. Send Photo (Always index 0 as it's the newest one in Camera folder usually)
                 if (ctx.vchat.sendPhoto([0], false)) {
+                    // Start a thread to delete the image after a delay (to ensure WeChat has sent it)
+                    var fileToDelete = localPath;
+                    threads.start(function () {
+                        sleep(5000); // Wait 5 seconds
+                        files.remove(fileToDelete);
+                        media.scanFile(fileToDelete); // Update gallery to remove thumbnail
+                        console.log("ImageBot: Cleaned up file " + fileToDelete);
+                    });
                     return true;
                 } else {
                     ctx.vchat.sendText("图片发送失败，请检查相册权限");

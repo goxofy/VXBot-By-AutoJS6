@@ -313,47 +313,61 @@ export default {
      * @returns boolean
      */
     openUserSession(nickname) {
+        // [Async Fix] Ensure we start from clean state
+        this.backToHome();
+
         // 尝试查找搜索按钮，去除 depth 限制
-        let search = desc("搜索").findOne(5000);
+        let search = desc("搜索").findOne(2000);
         if (search) {
             search.click()
-            // 查找输入框，去除 depth 限制
-            // 务必使用 className 确认是输入框
-            let edit = className("EditText").findOne(5000)
+            // 查找输入框
+            let edit = className("EditText").findOne(2000)
             if (edit) {
                 edit.setText(nickname)
-                // 查找用户结果，去除 depth 限制，增加一点延时确保搜索结果出现
                 sleep(1500);
 
-                // 关键修正: 必须查找 className 为 TextView 的元素，防止匹配到搜索框自己(EditText)
-                // 同时 text 需要匹配昵称
-                const user = className("TextView").text(nickname).findOne(5000) ||
-                    className("TextView").textContains(nickname).findOne(5000);
+                // 查找用户结果
+                // 1. Exact Match First
+                let user = className("TextView").text(nickname).findOne(2000);
+                // 2. Contains Match Fallback (Be careful not to pick "Search related")
+                // We assume the first valid contact result usually appears at top
+                if (!user) {
+                    // Filter out the search text itself 
+                    user = className("TextView").textContains(nickname).find().filter(function (w) {
+                        return w.text() !== nickname && w.id() !== ""; // Weak filter
+                    })[0];
+                }
+
+                // Fallback: Just click the first list item below search bar
+                if (!user) {
+                    // Sometimes the result is a complex view group
+                    // Try to find a list item
+                    let list = className("ListView").findOne(1000) || className("RecyclerView").findOne(1000);
+                    if (list && list.childCount() > 0) {
+                        user = list.child(0);
+                    }
+                }
 
                 if (user) {
                     const rect = user.bounds()
-                    // 点击结果
                     click(rect.centerX(), rect.centerY())
                     sleep(1000);
 
-                    // 再次确认是否进入了聊天界面 (通过是否有"切换"语音/文字按钮，或者"相册"等特征)
-                    // 如果还在搜索页，说明没点进去
                     if (this.isChat()) {
                         return true;
                     }
 
-                    // 如果没进去，尝试稍微偏移一点再点一次，或者点父元素
-                    // 这里尝试点击中心点
+                    // Retry Click
                     click(rect.centerX(), rect.centerY())
                     sleep(1000);
                     if (this.isChat()) {
                         return true;
                     }
                 }
-                back()
             }
         }
-        return false
+        back(); // Exit search
+        return false;
     },
 
     /**
@@ -649,6 +663,111 @@ export default {
             } else {
                 // 尝试一种备选方案：回车发送（视设置而定）
                 // press(66) // KEYCODE_ENTER
+            }
+        }
+        return false;
+    },
+
+    /**
+     * 发送带艾特的消息 (回复群成员)
+     * 
+     * @param {string} who 被艾特的人昵称
+     * @param {string} content 消息内容
+     * @returns boolean
+     */
+    sendAtText(who, content) {
+        if (!className("EditText").exists()) {
+            this.switchToTextInput();
+            sleep(500);
+        }
+
+        let input = className("EditText").findOnce();
+        if (input) {
+            input.click();
+            sleep(200);
+
+            // 1. Trigger Mention List (JUST "@")
+            // User feedback: Inputting full "@Name" fails to trigger list. Must be just "@".
+            input.setText("@");
+            sleep(1500); // Wait for list popup
+
+            // 2. Select User from List
+            // The list should now be visible (e.g. "Select User" popup)
+            // We search for the text of the username `who`
+
+            // Try to find the text node strictly
+            let match = text(who).visibleToUser(true).findOne(2000);
+
+            if (!match) {
+                // Try "Contains" if exact match fails
+                match = textContains(who).visibleToUser(true).findOne(1000);
+            }
+
+            if (match) {
+                console.log("Found mention candidate: " + match.text());
+                let rect = match.bounds();
+                // Safety Check for Click
+                if (rect.centerX() < 0 || rect.centerY() < 0) {
+                    console.error("Invalid bounds for mention match: " + rect);
+                } else {
+                    // Try clicking the item container (parent) first for better hit rate
+                    // If parent is the ListView/RecyclerView, don't click it!
+                    let p = match.parent();
+                    if (p && !p.className().includes("RecyclerView") && !p.className().includes("ListView")) {
+                        let pr = p.bounds();
+                        click(pr.centerX(), pr.centerY());
+                    } else {
+                        click(rect.centerX(), rect.centerY());
+                    }
+
+                    // CRITICAL: Wait for WeChat to convert "@Tink" text into "[BlueBlock]"
+                    sleep(1000);
+                }
+            } else {
+                console.log("Mention list match failed for: " + who);
+                // Fallback: Use search bar in the popup?
+                // The screenshot shows a search bar with text "搜索"
+                let searchBar = text("搜索").findOne(1000);
+                if (searchBar) {
+                    let sb = searchBar.bounds();
+                    click(sb.centerX(), sb.centerY());
+                    sleep(500);
+                    // Now we are in search mode, type the name
+                    setText(who);
+                    sleep(1000);
+                    // Try finding again
+                    let searchMatch = text(who).visibleToUser(true).findOne(2000);
+                    if (searchMatch) {
+                        let smr = searchMatch.bounds();
+                        click(smr.centerX(), smr.centerY());
+                        sleep(1000);
+                    }
+                }
+            }
+
+            // 3. Append Content via Paste
+            // [Fix] Add a leading space manually. 
+            setClip(" " + content);
+            sleep(200);
+
+            // Re-focus input if needed
+            input.click();
+            sleep(200);
+
+            if (!input.paste()) {
+                let r = input.bounds();
+                longClick(r.centerX(), r.centerY());
+                sleep(800);
+                let pasteBtn = text("粘贴").findOnce();
+                if (pasteBtn) pasteBtn.click();
+            }
+            sleep(500);
+
+            // 4. Send
+            let btn = className("Button").text("发送").findOnce();
+            if (btn) {
+                btn.click();
+                return true;
             }
         }
         return false;
@@ -973,6 +1092,13 @@ export default {
                 // 找头像
                 let head = item.findOne(className("ImageView").descContains("头像"));
                 if (!head) continue;
+
+                // [Fix] Robustness: If avatar description is incomplete (just "头像"), 
+                // it means the nickname hasn't loaded. Skip to avoid "Phantom Context" or failure to filter nickname from text.
+                if (head.desc() === "头像") {
+                    console.log("Skipping message with incomplete avatar desc");
+                    continue;
+                }
 
                 // 判断头像位置
                 let headRect = head.bounds();

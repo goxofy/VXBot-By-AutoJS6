@@ -105,48 +105,105 @@ OpenAIBot.prototype.handle = function (ctx) {
     userContext.lastInput = text;
     userContext.history.push({ role: "user", content: text });
 
-    // 3. Pre-emptively Trigger Mention (Handling UI Shift Risk)
-    // We trigger the mention BEFORE calling the API, so we target the correct avatar location immediately.
-    var prefixText = "";
-    if (ctx.user && ctx.sender !== ctx.user && ctx.headRect) {
-        console.log("Triggering Real Mention (Long Click Avatar) PRE-API...");
-        try {
-            press(ctx.headRect.centerX(), ctx.headRect.centerY(), 800);
-            sleep(800); // Wait for "@User " to appear
-
-            // [Optimization] Dismiss keyboard explicitly
-            console.log("Dismissing keyboard...");
-            back();
-            sleep(500);
-        } catch (e) {
-            console.log("Long click failed: " + e);
-        }
-    } else if (ctx.user && ctx.sender !== ctx.user) {
-        // Fallback if no headRect found (unlikely) -> append text later
-        prefixText = "@" + ctx.user + " ";
-    }
-
     // 4. Call OpenAI API
     try {
         var responseText = this.callOpenAI(userContext.history);
         if (responseText) {
-            // Apply Manual Prefix Fallback if needed
-            if (prefixText) {
-                responseText = prefixText + responseText;
+
+            // [Sync Mode] Send Response Directly
+            // Unify with Async logic: Use Native Mention for Groups
+            if (ctx.user && ctx.sender !== ctx.user) {
+                // Group Chat -> Native Mention
+                // We don't have 'headRect' dependency anymore for sending, 
+                // but we need to ensure vchat.sendAtText is used.
+                console.log("[Sync] Sending Native @ Mention to: " + ctx.user);
+                ctx.vchat.sendAtText(ctx.user, responseText);
+            } else {
+                // Private Chat or Fallback
+                ctx.vchat.sendText(responseText);
             }
 
-            ctx.vchat.sendText(responseText);
             userContext.history.push({ role: "assistant", content: responseText });
             return true;
         }
     } catch (e) {
         console.error("OpenAI API Error: " + e);
         userContext.history.pop();
-        // Reset lastInput so we can retry if needed, or maybe keep it to avoid loop error
-        // userContext.lastInput = ""; 
     }
 
     return false;
+};
+
+/**
+ * [New] Async Handler
+ * Returns true if the message is accepted for processing.
+ * The result will be delivered via callback(context, replyText).
+ * @param {object} ctx
+ * @param {Function} callback - function(ctx, replyText)
+ */
+OpenAIBot.prototype.handleAsync = function (ctx, callback) {
+    // 1. Reuse logic from sync handle() to update context
+    // Ideally we should refactor handle() to share logic, 
+    // but for now let's copy the essential context checks to avoid breaking old sync flow.
+
+    var text = ctx.text;
+    var sessionName = ctx.notice ? ctx.notice.getTitle() : (ctx.sender || "Unknown");
+
+    // Filter Logic
+    if (this.config.whitelist.length > 0 && this.config.whitelist.indexOf(sessionName) === -1) return false;
+    if (this.config.blacklist.length > 0 && this.config.blacklist.indexOf(sessionName) > -1) return false;
+
+    // Context Key
+    var contextKey = ctx.user ? (sessionName + "_" + ctx.user) : sessionName;
+
+    var now = new Date().getTime();
+    if (!this.contexts[contextKey]) {
+        this.contexts[contextKey] = {
+            history: [{ role: "system", content: this.config.systemPrompt }],
+            lastActive: now,
+            lastInput: ""
+        };
+    }
+    var userContext = this.contexts[contextKey];
+
+    // Timeout Check
+    if (now - userContext.lastActive > this.config.contextTimeout) {
+        userContext.history = [{ role: "system", content: this.config.systemPrompt }];
+        userContext.lastActive = now;
+        userContext.lastInput = "";
+    }
+
+    // Dedupe
+    if (userContext.lastInput === text) {
+        return false;
+    }
+
+    // Update State
+    userContext.lastActive = now;
+    userContext.lastInput = text;
+    userContext.history.push({ role: "user", content: text });
+
+    // [Async] Start Thread for API Call
+    var self = this;
+    threads.start(function () {
+        try {
+            var reply = self.callOpenAI(userContext.history);
+            if (reply) {
+                userContext.history.push({ role: "assistant", content: reply });
+
+                // [Fix] Do NOT add prefix here for Async Mode. 
+                // The Sender (bot.js) handles the "@User" prefix via sendAtText.
+
+                // Callback with result
+                if (callback) callback(ctx, reply);
+            }
+        } catch (e) {
+            console.error("Async OpenAI Error: " + e);
+            userContext.history.pop();
+        }
+    });
+
+    return true; // Accepted for async processing
 };
 
 OpenAIBot.prototype.callOpenAI = function (messages) {

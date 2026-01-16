@@ -54,8 +54,8 @@ ImageBot.prototype.handleAsync = function (ctx, callback) {
     var text = ctx.text;
     if (!text) return false;
 
-    // Check trigger command
-    if (text.indexOf(this.triggerCommand) === -1) {
+    // Check trigger command - EXACT match only
+    if (text !== this.triggerCommand) {
         return false;
     }
 

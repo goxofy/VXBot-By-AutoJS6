@@ -23,14 +23,15 @@ bot.register(new ImageBot());
 
 // [Video] 视频下载插件
 bot.register(new VideoBot({
-    apiKey: "", // User provided key
+    apiKey: "", // 这个 API 的 KEY: https://rapidapi.com/tuan2308/api/snap-video3
     command: "" // 触发指令
 }));
 
+// [OpenAI] AI 对话插件 / 兜底插件
 bot.register(new OpenAIBot({
     apiKey: "", // 请替换为你自己的 API Key
     baseUrl: "", // 支持自定义 Base URL
-    model: "gpt", // 支持自定义模型
+    model: "", // 支持自定义模型
     contextTimeout: 20 * 60 * 1000, // 上下文记忆超时时间 (毫秒)，默认 20 分钟
     whitelist: WHITELIST, // 引用上方统一配置
     blacklist: []  // 黑名单
@@ -39,9 +40,8 @@ bot.register(new OpenAIBot({
 // 3. 启动配置
 bot.start({
     polling: true,      // 开启轮询
-    interval: 500,     // 轮询间隔 500ms
+    interval: 500,     // 轮询间隔 500 毫秒
     whitelist: WHITELIST, // 引用上方统一配置
-    mentionString: "", // [群聊优化] 必须 @机器人 名字才回复。例如 "@Bot"。留空则对所有白名单消息回复。
-    // [混合模式] 本次新增功能
+    mentionString: "@", // [群聊优化] 必须 @机器人 名字才回复。例如 "@Bot"。留空则对所有白名单消息回复。
     asyncMode: true    // true = 异步并行 (推荐, 响应快); false = 同步阻塞 (传统模式, 稳)
 });

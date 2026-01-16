@@ -6,16 +6,21 @@
 
 ## ✨ 特性 (Features)
 
-*   **⚡️ 异步并行**: 采用生产者-消费者模型，多任务并行处理，响应迅速。
-*   **🎬 视频下载**: 内置 **VideoBot**，支持抖音/快手等平台视频解析下载并分享。
-*   **🖼 图片发送**: 内置 **ImageBot**，支持发送随机风景美图 (Picsum)。
-*   **🤖 AI 对话**: 内置 **OpenAIBot**，支持多轮对话、上下文记忆。
-*   **📲 Intent 分享**: 视频/图片采用 Android Intent 机制分享，稳定可靠。
-*   **💬 消息引用**: 回复自动带上原消息引用 (Re: xxx)，清晰对应。
-*   **📡 主动轮询**: 列表轮询机制，主动扫描未读消息。
-*   **🛡 智能过滤**: 
-    *   **白名单机制**: 只回复指定好友/群的会话。
-    *   **群聊优化**: 群聊中需 **@机器人** 才会触发，避免刷屏。
+### 核心架构
+*   **⚡️ 异步并行**: 采用生产者-消费者模型，多任务并行处理，响应迅速
+*   **🔒 线程安全**: 使用 Lock 保护发送队列，确保消息准确投递
+*   **📲 Intent 分享**: 视频/图片采用 Android Intent 机制直接分享，无需进入会话
+
+### 插件功能
+*   **🎬 VideoBot**: 支持抖音/快手等平台视频解析下载并分享
+*   **🖼 ImageBot**: 发送随机风景美图 (Picsum)
+*   **🤖 OpenAIBot**: 多轮对话、上下文记忆
+
+### 智能特性
+*   **💬 消息引用**: 回复自动带上原消息引用 (Re: xxx)
+*   **🛡 智能去重**: 双重保护 - 处理窗口去重 (5s) + 已回复去重 (120s TTL)
+*   **📡 主动轮询**: 列表轮询机制，主动扫描未读消息
+*   **👥 群聊优化**: 支持 @机器人 触发，群聊回复自动 @发送者
 
 ## 🛠 快速开始 (Quick Start)
 
@@ -36,57 +41,52 @@ npm run demo
 构建完成后，会在 `dist/` 目录下生成 **`VXBot.js`**。
 
 ### 3. 运行
-1.  将 `dist/VXBot.js` 发送到手机。
-2.  在 AutoJS6 中运行该脚本。
-3.  授予必要的权限 (无障碍服务、悬浮窗)。
-4.  脚本会自动启动 VX 并开始工作。
+1.  将 `dist/VXBot.js` 发送到手机
+2.  在 AutoJS6 中运行该脚本
+3.  授予必要的权限 (无障碍服务、悬浮窗)
+4.  脚本会自动启动 VX 并开始工作
 
 ## 💬 指令与功能
 
 | 功能 | 触发方式 | 说明 |
 | :--- | :--- | :--- |
-| **AI 对话** | 发送文本 | 默认由 ChatGPT 回复 (需在白名单内) |
-| **视频下载** | `下载 [链接]` | 支持抖音/快手等平台，自动解析并分享视频 |
-| **发送图片** | `发图` | 从 Picsum 下载随机风景图并发送 |
+| **AI 对话** | 发送文本 | 默认由 ChatGPT 回复 |
+| **视频下载** | `下载 [链接]` | 支持抖音/快手等平台 |
+| **发送图片** | `发图` | 精确匹配指令 |
 | **群聊召唤** | `@机器人名 消息` | 例如：`@Bot 讲个笑话` |
 
 ## ⚙️ 配置 (Configuration)
 
 在 `demo.js` 中进行修改：
 
-### 1. 基础配置
 ```javascript
-// 白名单：只有在这个列表里的会话才会进入处理
+// 白名单配置
 const WHITELIST = ["好友A", "技术交流群"];
-```
 
-### 2. 注册插件
-```javascript
+// 图片插件
+bot.register(new ImageBot());
+
 // 视频下载插件
 bot.register(new VideoBot({
     apiKey: "your-rapidapi-key",
     command: "下载"
 }));
 
-// 图片插件
-bot.register(new ImageBot());
-
 // OpenAI 插件
 bot.register(new OpenAIBot({
     apiKey: "sk-xxxx",
     baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4"
+    model: "gpt-4",
+    whitelist: WHITELIST
 }));
-```
 
-### 3. 启动参数
-```javascript
+// 启动配置
 bot.start({
-    polling: true,        // 开启轮询
-    interval: 500,        // 轮询间隔 (毫秒)
+    polling: true,
+    interval: 500,
     whitelist: WHITELIST,
-    mentionString: "@Bot", // 群聊触发关键词
-    asyncMode: true       // 异步并行模式 (推荐)
+    mentionString: "@Bot",
+    asyncMode: true
 });
 ```
 
@@ -103,9 +103,6 @@ bot.start({
                       │  (Consumer) │
                       └─────────────┘
 ```
-
-## 🤝 贡献
-欢迎提交 Issue 或 Pull Request！
 
 ## 🙏 致谢
 特别感谢 [tmkook/vchat](https://github.com/tmkook/vchat) 项目提供的基础思路与核心代码实现。

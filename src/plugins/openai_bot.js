@@ -161,7 +161,9 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         this.contexts[contextKey] = {
             history: [{ role: "system", content: this.config.systemPrompt }],
             lastActive: now,
-            lastInput: ""
+            lastInput: "",
+            lastRepliedInput: "",  // The input that got a successful reply
+            lastRepliedTime: 0     // Timestamp of last successful reply
         };
     }
     var userContext = this.contexts[contextKey];
@@ -171,25 +173,49 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         userContext.history = [{ role: "system", content: this.config.systemPrompt }];
         userContext.lastActive = now;
         userContext.lastInput = "";
+        userContext.lastRepliedInput = "";
+        userContext.lastRepliedTime = 0;
+        userContext.lastProcessTime = 0;  // Time when we started processing
     }
 
-    // Dedupe
-    if (userContext.lastInput === text) {
+    // [Smart Dedupe - Part 1] Processing Window
+    // If same message is being processed within 5 seconds, dedupe (even before reply)
+    // This handles consecutive duplicate messages in the same batch
+    var PROCESS_WINDOW = 5 * 1000; // 5 seconds
+    if (text === userContext.lastInput &&
+        (now - userContext.lastProcessTime) < PROCESS_WINDOW) {
+        console.log("[OpenAI] Dedupe: Same message being processed within 5s");
+        return false;
+    }
+
+    // [Smart Dedupe - Part 2] Reply-based TTL
+    // If we already replied to this exact message within TTL, dedupe
+    var DEDUPE_TTL = 120 * 1000; // 120 seconds
+    if (text === userContext.lastInput &&
+        text === userContext.lastRepliedInput &&
+        (now - userContext.lastRepliedTime) < DEDUPE_TTL) {
+        console.log("[OpenAI] Dedupe: Already replied to '" + text.substring(0, 20) + "...' within TTL");
         return false;
     }
 
     // Update State
     userContext.lastActive = now;
     userContext.lastInput = text;
+    userContext.lastProcessTime = now;  // Mark start of processing
     userContext.history.push({ role: "user", content: text });
 
     // [Async] Start Thread for API Call
     var self = this;
+    var inputText = text; // Capture for closure
     threads.start(function () {
         try {
             var reply = self.callOpenAI(userContext.history);
             if (reply) {
                 userContext.history.push({ role: "assistant", content: reply });
+
+                // [Smart Dedupe] Mark this input as successfully replied
+                userContext.lastRepliedInput = inputText;
+                userContext.lastRepliedTime = new Date().getTime();
 
                 // [Fix] Do NOT add prefix here for Async Mode. 
                 // The Sender (bot.js) handles the "@User" prefix via sendAtText.
@@ -222,7 +248,7 @@ OpenAIBot.prototype.callOpenAI = function (messages) {
     var body = res.body.json();
     if (body && body.choices && body.choices.length > 0) {
         var reply = body.choices[0].message.content;
-        console.log("OpenAI Reply: " + reply);
+        console.log("[OpenAI] Received reply");
         return reply;
     } else {
         console.error("OpenAI Invalid Response: " + JSON.stringify(body));

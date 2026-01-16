@@ -1,10 +1,12 @@
 /**
- * Image Bot Plugin
+ * Image Bot Plugin (Async Version)
  * 回复 "发图" 指令，发送随机风景美图 (Picsum)
+ * 采用异步模式，不阻塞主线程
  */
 function ImageBot(config) {
     this.name = "ImageBot";
     this.config = config || {};
+    this.triggerCommand = this.config.command || "发图";
 }
 
 ImageBot.prototype.getRandomImage = function () {
@@ -27,7 +29,6 @@ ImageBot.prototype.downloadImage = function (url) {
     try {
         var img = http.get(url, { timeout: 30000 }).body.bytes();
         // Save to DCIM/Camera so it appears in album easily
-        // Note: files.getSdcardPath() usually returns /sdcard
         var dir = "/sdcard/DCIM/Camera/";
         files.ensureDir(dir);
         var fileName = "picsum_" + new Date().getTime() + ".jpg";
@@ -45,68 +46,69 @@ ImageBot.prototype.downloadImage = function (url) {
     return null;
 };
 
-ImageBot.prototype.handle = function (ctx) {
+/**
+ * Async Handler (Non-blocking)
+ * Uses callback pattern like VideoBot
+ */
+ImageBot.prototype.handleAsync = function (ctx, callback) {
     var text = ctx.text;
     if (!text) return false;
 
-    // 指令: 发图
-    if (text.indexOf("发图") > -1) {
-        console.log("ImageBot: 收到发图指令");
-
-        // 1. Send tip with mention (Group only)
-        var replyPrefix = "";
-        if (!ctx.isPrivate && ctx.user) {
-            // Try long click avatar first
-            if (ctx.headRect) {
-                try {
-                    console.log("ImageBot: Triggering Long Click Mention...");
-                    press(ctx.headRect.centerX(), ctx.headRect.centerY(), 800);
-                    sleep(800); // Wait for @Name to appear
-                    back(); // Dismiss keyboard
-                    sleep(500);
-                } catch (e) {
-                    console.error("ImageBot: Long click failed, falling back to text mention.");
-                    replyPrefix = "@" + ctx.user + " ";
-                }
-            } else {
-                replyPrefix = "@" + ctx.user + " ";
-            }
-        }
-
-        ctx.vchat.sendText(replyPrefix + "正在寻找美图，请稍候...");
-
-        // 2. Fetch & Download
-        var imgUrl = this.getRandomImage();
-        if (imgUrl) {
-            var localPath = this.downloadImage(imgUrl);
-            if (localPath) {
-                // Wait a bit for MediaScanner
-                sleep(2000);
-
-                // 3. Send Photo (Always index 0 as it's the newest one in Camera folder usually)
-                if (ctx.vchat.sendPhoto([0], false)) {
-                    // Start a thread to delete the image after a delay (to ensure WeChat has sent it)
-                    var fileToDelete = localPath;
-                    threads.start(function () {
-                        sleep(5000); // Wait 5 seconds
-                        files.remove(fileToDelete);
-                        media.scanFile(fileToDelete); // Update gallery to remove thumbnail
-                        console.log("ImageBot: Cleaned up file " + fileToDelete);
-                    });
-                    return true;
-                } else {
-                    ctx.vchat.sendText("图片发送失败，请检查相册权限");
-                }
-            } else {
-                ctx.vchat.sendText("下载图片失败");
-            }
-        } else {
-            ctx.vchat.sendText("获取图片信息失败");
-        }
-        return true;
+    // Check trigger command
+    if (text.indexOf(this.triggerCommand) === -1) {
+        return false;
     }
 
-    return false;
+    console.log("[ImageBot] 收到发图指令 (Async)");
+
+    // [Optimization] Send immediate feedback SYNCHRONOUSLY while still in chat
+    // This avoids one round of entering/exiting the chat
+    // ctx.vchat is safe to use here because we're still in the main polling thread
+    if (ctx.vchat && ctx.vchat.isChat()) {
+        // Add Re: prefix to match the reply format
+        var originalMsg = ctx.text.length > 30 ? ctx.text.substring(0, 30) + "..." : ctx.text;
+        var feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在寻找美图，请稍候...";
+
+        // Use @mention for group chats
+        if (!ctx.isPrivate && ctx.user) {
+            ctx.vchat.sendAtText(ctx.user, feedbackText);
+        } else {
+            ctx.vchat.sendText(feedbackText);
+        }
+        console.log("[ImageBot] Sent sync feedback");
+    }
+
+    var self = this;
+    threads.start(function () {
+        try {
+            // Fetch & Download
+            var imgUrl = self.getRandomImage();
+            if (imgUrl) {
+                var localPath = self.downloadImage(imgUrl);
+                if (localPath) {
+                    // Wait a bit for MediaScanner
+                    sleep(1000);
+
+                    // Callback with image type for Intent sharing
+                    // Intent sharing works WITHOUT being in the target chat
+                    callback(ctx, {
+                        type: "image",
+                        path: localPath,
+                        text: "来自 Picsum 的随机美图"
+                    });
+                } else {
+                    callback(ctx, { type: "text", content: "下载图片失败" });
+                }
+            } else {
+                callback(ctx, { type: "text", content: "获取图片信息失败" });
+            }
+        } catch (e) {
+            console.error("[ImageBot] Error: " + e);
+            callback(ctx, { type: "text", content: "处理出错: " + e });
+        }
+    });
+
+    return true; // Accepted
 };
 
 export default ImageBot;

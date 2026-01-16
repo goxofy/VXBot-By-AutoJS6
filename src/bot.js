@@ -38,9 +38,12 @@ Bot.prototype.start = function (config) {
     this.polling = config.polling || false;
     this.interval = config.interval || 5000;
     this.whitelist = config.whitelist || [];
-    this.mentionString = config.mentionString || "";
-
-    this.asyncMode = config.asyncMode !== false; // Default to TRUE (Async)
+    this.mentionString = config.mentionString || ""; // [Fix] Assign mentionString from config!
+    this.sendQueue = [];
+    this.uiLock = false;
+    // [Thread Safety] Lock for queue operations to prevent data corruption between threads
+    this.queueLock = threads.lock();
+    this.asyncMode = config.asyncMode === undefined ? true : config.asyncMode; // Default to True default (Async)
 
     this.uiLock = false;
     var self = this;
@@ -153,6 +156,18 @@ Bot.prototype.start = function (config) {
                                     // [Action] Read Only
                                     self.readAndDispatch(matchName, isAtMe);
 
+                                    // [Fix] Quick recheck for messages that arrived during processing
+                                    // Only wait once (300ms) and only reprocess if message count increased
+                                    if (vchat.isChat()) {
+                                        var countBefore = vchat.getRecentMessages().length;
+                                        sleep(300);
+                                        var countAfter = vchat.getRecentMessages().length;
+                                        if (countAfter > countBefore) {
+                                            console.log("Quick recheck: Found " + (countAfter - countBefore) + " new message(s)");
+                                            self.readAndDispatch(matchName, false);
+                                        }
+                                    }
+
                                     vchat.finish();
                                     sleep(500);
 
@@ -215,51 +230,76 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
         buckets[m.sender].push(m);
     }
 
-    // Clean Text & Dispatch
+    // [Refactor] Process each message INDIVIDUALLY
+    // This ensures "发图" and "你好" are handled by different plugins
     for (var senderName in buckets) {
         var senderMsgs = buckets[senderName];
-        var lastMsg = senderMsgs[senderMsgs.length - 1];
-        var combinedDetails = senderMsgs.map(function (m) { return m.text; }).join("\n");
 
-        var cleanText = combinedDetails;
-        if (this.mentionString) {
-            cleanText = cleanText.split(this.mentionString).join("").trim();
-        }
+        for (var mi = 0; mi < senderMsgs.length; mi++) {
+            var msg = senderMsgs[mi];
+            var rawText = msg.text;
 
-        var context = {
-            isPolling: true,
-            text: cleanText,
-            sender: title,
-            user: senderName,
-            isPrivate: isPrivateChat,
-            headRect: null, // Removed: headRect is useless for Async because it expires when we leave chat
-            vchat: vchat // Note: vchat here is unsafe to use directly in async thread for UI ops!
-        };
+            var cleanText = rawText;
+            if (this.mentionString) {
+                // [Fix] Robust Mention Stripping
+                function escapeRegExp(string) {
+                    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                }
+                var escapedMention = escapeRegExp(this.mentionString);
+                var re = new RegExp(escapedMention + "[\\s\\u2005]*", "g");
+                cleanText = cleanText.replace(re, "").trim();
+            }
 
-        var self = this;
-        // Dispatch to plugins
-        for (var j = 0; j < this.plugins.length; j++) {
-            var plugin = this.plugins[j];
+            // Skip empty messages after cleaning
+            if (!cleanText || cleanText.length === 0) continue;
 
-            if (this.asyncMode && plugin.handleAsync) {
-                // [MODE] Async
-                console.log("Dispatching to Async Plugin: " + plugin.name);
-                var accepted = plugin.handleAsync(context, function (ctx, replyText) {
-                    // Callback Logic
-                    console.log("Async Work Done. Enqueuing Reply: " + replyText);
-                    self.enqueueReply(ctx, replyText);
-                });
-                if (accepted) break;
-            } else {
-                // [MODE] Sync (Fallback or Explicit)
-                console.log("Dispatching to Sync Plugin (Blocking): " + plugin.name);
-                try {
-                    if (plugin.handle(context)) {
-                        sleep(1000);
-                        break;
+            console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + cleanText.substring(0, 50) + "...]");
+
+            var context = {
+                sessionName: title,
+                isPolling: true,
+                text: cleanText,
+                sender: title,
+                user: senderName,
+                isPrivate: isPrivateChat,
+                headRect: null,
+                vchat: vchat
+            };
+
+            var self = this;
+            // Dispatch to plugins - first accepting plugin wins FOR THIS MESSAGE
+            for (var j = 0; j < this.plugins.length; j++) {
+                var plugin = this.plugins[j];
+
+                if (this.asyncMode && plugin.handleAsync) {
+                    console.log("  -> Trying Async Plugin: " + plugin.name);
+                    var accepted = plugin.handleAsync(context, function (ctx, replyText) {
+                        console.log("Async Work Done. Enqueuing Reply: " + (typeof replyText === 'string' ? replyText : "[object Object]"));
+                        self.queueLock.lock();
+                        try {
+                            self.sendQueue.push({
+                                task: ctx,
+                                data: replyText
+                            });
+                        } finally {
+                            self.queueLock.unlock();
+                        }
+                    });
+
+                    if (accepted) {
+                        console.log("  -> Accepted by: " + plugin.name);
+                        break; // This message is handled, move to next message
                     }
-                } catch (e) {
-                    console.error("Sync Plugin Error: " + e);
+                } else {
+                    console.log("  -> Trying Sync Plugin: " + plugin.name);
+                    try {
+                        if (plugin.handle(context)) {
+                            sleep(1000);
+                            break;
+                        }
+                    } catch (e) {
+                        // Ignore sync plugin errors
+                    }
                 }
             }
         }
@@ -283,39 +323,131 @@ Bot.prototype.enqueueReply = function (ctx, replyText) {
  * Process Send Queue (Consumer)
  */
 Bot.prototype.processSendQueue = function () {
-    if (this.sendQueue.length === 0) return;
     if (this.uiLock) return; // Wait for UI available
 
-    // Pop the oldest
-    var task = this.sendQueue.shift();
+    var taskItem = null;
+
+    // [Thread Safety] Locking
+    this.queueLock.lock();
+    try {
+        if (this.sendQueue.length > 0) {
+            taskItem = this.sendQueue.shift();
+        }
+    } finally {
+        this.queueLock.unlock();
+    }
+
+    if (!taskItem) return; // Nothing to process
+
+    // Determine the structure of the task item
+    var task;
+    if (taskItem.task && taskItem.data) { // From handleAsync callback
+        task = taskItem.task;
+        task.reply = taskItem.data; // Add reply to task context for consistency
+    } else { // From enqueueReply
+        task = taskItem;
+    }
+
     console.log("Processing Send Task for: " + task.sessionName);
 
     this.uiLock = true;
     try {
         vchat.openApp(); // Ensure in app
 
-        // Use Search to find session
-        // This is Phase 3 dependency, but basic implementation needed now
-        var success = vchat.openUserSession(task.sessionName);
-        if (!success) {
-            console.error("Failed to find session: " + task.sessionName + ". Dropping message.");
-            return;
-        }
+        // [Fix] Strip group member count suffix like "(2)" from session name
+        // WeChat displays "hhh(2)" in chat title but search requires just "hhh"
+        var cleanSessionName = task.sessionName.replace(/\(\d+\)$/, "").trim();
 
         // Send logic
-        var finalText = task.reply;
+        var replyData = task.reply;
 
-        // [Fix] Use Native Mention for Groups
-        if (!task.isPrivate && task.user) {
-            console.log("Sending Native @ Mention to: " + task.user);
-            vchat.sendAtText(task.user, finalText);
-        } else {
-            vchat.sendText(finalText);
+        // Normalize string reply to object
+        if (typeof replyData === 'string') {
+            replyData = { type: 'text', content: replyData };
         }
 
-        sleep(1000);
-        vchat.finish();
-        sleep(500);
+        // [Optimization] For image/video, use Intent sharing directly from home screen
+        // No need to enter the session first - Intent handles target selection
+        if (replyData.type === 'video') {
+            console.log("Sending Video via Share Intent (Safe): " + replyData.path);
+
+            // [Thread Safety Fix] Use Intent Sharing
+            // Share to the SESSION (group or private chat), not to task.user
+            // task.user is the sender WITHIN the chat, not the chat itself
+            var success = vchat.shareVideoTo(replyData.path, cleanSessionName);
+            if (!success) {
+                console.error("Failed to share video to: " + cleanSessionName);
+            } else {
+                // [Cleanup] Delete video file after sending, similar to ImageBot
+                var fileToDelete = replyData.path;
+                threads.start(function () {
+                    sleep(5000); // Wait 5 seconds for WeChat to finish processing
+                    files.remove(fileToDelete);
+                    media.scanFile(fileToDelete); // Update gallery to remove thumbnail
+                    console.log("[VideoBot] Cleaned up file: " + fileToDelete);
+                });
+            }
+
+            // Back to home explicitly after share interaction
+            vchat.finish();
+
+        } else if (replyData.type === 'image') {
+            console.log("Sending Image via Share Intent (Safe): " + replyData.path);
+
+            // Use Intent Sharing for images (same as video)
+            var success = vchat.shareImageTo(replyData.path, cleanSessionName);
+            if (!success) {
+                console.error("Failed to share image to: " + cleanSessionName);
+            } else {
+                // Cleanup after sending
+                var fileToDelete = replyData.path;
+                threads.start(function () {
+                    sleep(5000);
+                    files.remove(fileToDelete);
+                    media.scanFile(fileToDelete);
+                    console.log("[ImageBot] Cleaned up file: " + fileToDelete);
+                });
+            }
+
+            vchat.finish();
+
+        } else {
+            // Text Mode - need to enter session first
+            console.log("Searching for session: " + cleanSessionName);
+            var success = vchat.openUserSession(cleanSessionName);
+            if (!success) {
+                console.error("Failed to find session: " + task.sessionName + ". Dropping message.");
+                return;
+            }
+
+            // Text Sending:
+            var finalText = replyData.content || "";
+
+            // [Feature] Add original message reference
+            if (task.text && finalText) {
+                // Truncate original message if too long
+                var originalMsg = task.text.length > 30 ? task.text.substring(0, 30) + "..." : task.text;
+                finalText = "Re: " + originalMsg + "\n------------------------------\n" + finalText;
+            }
+
+            if (!task.isPrivate && task.user) {
+                console.log("Sending Native @ Mention to: " + task.user);
+                vchat.sendAtText(task.user, finalText);
+            } else {
+                vchat.sendText(finalText);
+            }
+
+            // [Fix] Recheck for new messages after sending feedback
+            // This ensures we don't miss messages sent while we were sending
+            if (vchat.isChat()) {
+                sleep(500);
+                var title = vchat.getTitle();
+                console.log("Rechecking for new messages in: " + title);
+                this.readAndDispatch(title, false);
+            }
+
+            vchat.finish();
+        }
 
     } catch (e) {
         console.error("Send Error: " + e);

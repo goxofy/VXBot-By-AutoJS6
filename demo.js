@@ -1,6 +1,7 @@
 import { Bot } from './src/bot.js'
 import OpenAIBot from './src/plugins/openai_bot.js'
 import ImageBot from './src/plugins/image_bot.js'
+import VideoBot from './src/plugins/video_bot.js'
 
 /**
  * 演示脚本
@@ -19,6 +20,12 @@ const WHITELIST = []; // 例如 ["文件传输助手", "技术交流群"]
 
 // [Testing] 优先注册发图插件
 bot.register(new ImageBot());
+
+// [Video] 视频下载插件
+bot.register(new VideoBot({
+    apiKey: "", // User provided key
+    command: "" // 触发指令
+}));
 
 bot.register(new OpenAIBot({
     apiKey: "", // 请替换为你自己的 API Key

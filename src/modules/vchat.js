@@ -879,6 +879,16 @@ export default {
     },
 
     /**
+     * 发送视频 (默认发送相册最新的一项)
+     * @returns boolean
+     */
+    sendVideo() {
+        // Reuse sendPhoto logic logic effectively, checking the first item
+        // Video and Photo are mixed in Album.
+        return this.sendPhoto([0], false);
+    },
+
+    /**
      * 接收新的好友请求
      * 
      * @returns boolean
@@ -1080,18 +1090,44 @@ export default {
      * @returns {Array} List of message objects
      */
     getRecentMessages() {
-        // Fix: Scan RelativeLayout
-        let allItems = className("RelativeLayout").find();
+        // [Fix] Strict Container Search
+        // Prevent selecting RootView which merges Title + Message
+        let list = className("RecyclerView").findOne(2000);
+        if (!list) {
+            list = className("ListView").findOne(1000);
+        }
+
+        // If no list found, we cannot reliably read messages.
+        if (!list) return [];
+
+        let allItems = list.children();
         let messages = [];
 
-        if (!allItems.empty()) {
+        if (allItems && allItems.size() > 0) {
             // 从下往上找
             for (let i = allItems.size() - 1; i >= 0; i--) {
                 let item = allItems.get(i);
 
+                // Skip invalid items (e.g. date separators often are small/different)
+                if (!item) continue;
+
                 // 找头像
                 let head = item.findOne(className("ImageView").descContains("头像"));
-                if (!head) continue;
+                if (!head) {
+                    // [Fix] Time Separator Check
+                    // If we encounter an item without avatar, it might be a Timestamp.
+                    // If it IS a timestamp, it indicates a time gap, so we should stop scanning older history.
+                    let textViews = item.find(className("TextView"));
+                    if (textViews.size() > 0) {
+                        let t = textViews.get(0).text();
+                        // Reuse valid timestamp regex
+                        if (/^\s*\d{1,2}:\d{2}\s*$/.test(t) || /^((凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|深夜|半夜|昨天|今天|明天|周|星期).*?\d{1,2}:\d{2}|^\d{2,4}[年\.\/-]\d{1,2}[月\.\/-]\d{1,2})/.test(t)) {
+                            console.log(">> Reached Timestamp Separator [" + t + "], stopping scan.");
+                            break;
+                        }
+                    }
+                    continue;
+                }
 
                 // [Fix] Robustness: If avatar description is incomplete (just "头像"), 
                 // it means the nickname hasn't loaded. Skip to avoid "Phantom Context" or failure to filter nickname from text.
@@ -1122,14 +1158,15 @@ export default {
                     }
                 }
 
+                // Collect all valid text parts
+                let textParts = [];
+
                 for (let j = startIndex; j < tvs.size(); j++) {
                     let t = tvs.get(j);
                     let txt = t.text().trim();
 
                     // Filter empty or too small views
                     if (t.bounds().height() <= 20 || txt.length === 0) continue;
-
-
 
                     // [Fix] Filter Timestamp
                     // 1. Strict Pure Time: "12:00", " 12:00 ", "12:00"
@@ -1143,22 +1180,23 @@ export default {
                     // If the text is exactly the sender's name (minus "头像" suffix), ignore it.
                     let senderName = head.desc().replace("头像", "");
                     if (txt === senderName || senderName.indexOf(txt) > -1) {
-                        console.log("Ignored sender name text: " + txt);
                         continue;
                     }
 
-                    // [Fix] Filter Quoted Text (Reference)
-                    // WeChat quotes usually look like:
-                    // "To user: message..." (English)
-                    // "引用 old_msg : current_msg" (Sometimes separate TextViews?)
-                    // If it's a small gray text above the main message, it might be a quote.
-                    // For now, let's assume filtering Nickname is enough for "Tink".
+                    // [Fix] Filter Group Title Pattern
+                    // Group titles often appear as "GroupName(N)" where N is member count
+                    // This should NOT be part of a message bubble, but filter just in case
+                    if (/^.+\(\d+\)$/.test(txt) && txt.length < 20) {
+                        console.log(">> Filtered Group Title Pattern: [" + txt + "]");
+                        continue;
+                    }
 
-                    tv = t;
-                    break;
+                    // Debug: Log each collected part
+                    console.log(">> Collecting text part: [" + txt.substring(0, 50) + "...]");
+                    textParts.push(txt);
                 }
 
-                if (tv) {
+                if (textParts.length > 0) {
                     let senderName = head.desc();
                     if (senderName.indexOf("头像") > -1) {
                         senderName = senderName.replace("头像", "");
@@ -1166,7 +1204,7 @@ export default {
 
                     // 插入到数组开头 (保持时间顺序: 旧 -> 新)
                     messages.unshift({
-                        text: tv.text(),
+                        text: textParts.join(" "), // Join parts with space
                         sender: senderName,
                         rect: item.bounds(),
                         headRect: head.bounds()
@@ -1178,11 +1216,15 @@ export default {
     },
 
     getLatestMessage() {
-        // 重写逻辑: 扫描 RelativeLayout
-        let allItems = className("RelativeLayout").find();
+        // [Fix] Also apply Strict Container Search for getLatestMessage
+        let list = className("RecyclerView").findOne(2000);
+        if (!list) list = className("ListView").findOne(1000);
+        if (!list) return null;
+
+        let allItems = list.children();
         let lastFriendMsg = null;
 
-        if (!allItems.empty()) {
+        if (allItems && allItems.size() > 0) {
             // 从下往上找
             for (let i = allItems.size() - 1; i >= 0; i--) {
                 let item = allItems.get(i);
@@ -1243,6 +1285,180 @@ export default {
             }
         }
         return lastFriendMsg;
+    },
+
+    /**
+     * 分享视频到指定会话 (解决多线程并发文件混淆问题)
+     * 使用 Android Intent 直接调起微信分享界面，指定通过 FileURI 发送特定文件。
+     */
+    shareVideoTo(path, who) {
+        try {
+            // [Fix] Android 7.0+ FileUriExposedException Bypass
+            // This is a common hack in AutoJS to allow passing file:// URIs in Intents
+            importClass(android.os.StrictMode);
+            var builder = new StrictMode.VmPolicy.Builder();
+            StrictMode.setVmPolicy(builder.build());
+
+            // [Fix] Properly create URI
+            var file = new java.io.File(path);
+            var uri = android.net.Uri.fromFile(file);
+
+            app.startActivity({
+                action: "android.intent.action.SEND",
+                type: "video/*",
+                packageName: "com.tencent.mm",
+                className: "com.tencent.mm.ui.tools.ShareImgUI",
+                extras: {
+                    "android.intent.extra.STREAM": uri
+                }
+            });
+
+            // 2. 等待 "选择" 界面出现
+            // 根据截图优化：标题 "选择一个聊天"，按钮 "+ 创建新的聊天"
+            // 策略：检测标题、搜索框、或特定的列表头
+            let prepared = text("选择一个聊天").findOne(5000)
+                || text("创建新的聊天").findOne(5000)
+                || text("最近聊天").findOne(5000)
+                || textMatches(/.*选择.*/).findOne(5000)
+                || className("ListView").findOne(5000);
+
+            if (!prepared) {
+                console.error("Share UI did not open (Timeout)");
+                return false;
+            }
+
+            // 3. 搜索目标用户
+            sleep(500);
+
+            // 策略A: 直接在当前屏幕找 (最近聊天)
+            // 也就是截图中看到的 "hhh", "Tink" 等
+            let directTarget = text(who).visibleToUser(true).findOne(1000);
+            if (directTarget) {
+                console.log("Found target directly: " + who);
+                click(directTarget.bounds().centerX(), directTarget.bounds().centerY());
+            } else {
+                // 策略B: 点击搜索
+                // 截图中是顶部的一个搜索栏，里面有 "🔍 搜索"
+                let searchBtn = text("搜索").findOne(2000)
+                    || desc("搜索").findOne(2000)
+                    || className("TextView").textContains("搜索").findOne(2000);
+
+                if (searchBtn) {
+                    click(searchBtn.bounds().centerX(), searchBtn.bounds().centerY());
+                    sleep(1000);
+                    setText(who);
+                    sleep(1500);
+
+                    // 搜索结果列表
+                    let match = text(who).visibleToUser(true).findOne(3000) || textStartsWith(who).visibleToUser(true).findOne(3000);
+                    if (match) {
+                        click(match.bounds().centerX(), match.bounds().centerY());
+                    } else {
+                        console.error("Target not found in share search: " + who);
+                        back(); sleep(500); back();
+                        return false;
+                    }
+                } else {
+                    console.error("Cannot find Search button in Share UI");
+                    return false;
+                }
+            }
+
+            sleep(500);
+            let sendBtn = text("发送").findOne(3000) || className("Button").text("发送").findOne(3000) || textMatches("发送.*").findOne(2000);
+
+            if (sendBtn) {
+                sendBtn.click();
+                sleep(500);
+                return true;
+            }
+        } catch (e) {
+            console.error("ShareVideoTo Error: " + e);
+        }
+        return false;
+    },
+
+    /**
+     * 分享图片到指定会话 (Intent 方式)
+     * 与 shareVideoTo 类似，但使用 image/* MIME 类型
+     */
+    shareImageTo(path, who) {
+        try {
+            // [Fix] Android 7.0+ FileUriExposedException Bypass
+            importClass(android.os.StrictMode);
+            var builder = new StrictMode.VmPolicy.Builder();
+            StrictMode.setVmPolicy(builder.build());
+
+            var file = new java.io.File(path);
+            var uri = android.net.Uri.fromFile(file);
+
+            app.startActivity({
+                action: "android.intent.action.SEND",
+                type: "image/*",
+                packageName: "com.tencent.mm",
+                className: "com.tencent.mm.ui.tools.ShareImgUI",
+                extras: {
+                    "android.intent.extra.STREAM": uri
+                }
+            });
+
+            // Wait for share UI
+            let prepared = text("选择一个聊天").findOne(5000)
+                || text("创建新的聊天").findOne(5000)
+                || text("最近聊天").findOne(5000)
+                || textMatches(/.*选择.*/).findOne(5000)
+                || className("ListView").findOne(5000);
+
+            if (!prepared) {
+                console.error("Share UI did not open (Timeout)");
+                return false;
+            }
+
+            sleep(500);
+
+            // Try to find target directly
+            let directTarget = text(who).visibleToUser(true).findOne(1000);
+            if (directTarget) {
+                console.log("Found target directly: " + who);
+                click(directTarget.bounds().centerX(), directTarget.bounds().centerY());
+            } else {
+                // Search for target
+                let searchBtn = text("搜索").findOne(2000)
+                    || desc("搜索").findOne(2000)
+                    || className("TextView").textContains("搜索").findOne(2000);
+
+                if (searchBtn) {
+                    click(searchBtn.bounds().centerX(), searchBtn.bounds().centerY());
+                    sleep(1000);
+                    setText(who);
+                    sleep(1500);
+
+                    let match = text(who).visibleToUser(true).findOne(3000) || textStartsWith(who).visibleToUser(true).findOne(3000);
+                    if (match) {
+                        click(match.bounds().centerX(), match.bounds().centerY());
+                    } else {
+                        console.error("Target not found in share search: " + who);
+                        back(); sleep(500); back();
+                        return false;
+                    }
+                } else {
+                    console.error("Cannot find Search button in Share UI");
+                    return false;
+                }
+            }
+
+            sleep(500);
+            let sendBtn = text("发送").findOne(3000) || className("Button").text("发送").findOne(3000) || textMatches("发送.*").findOne(2000);
+
+            if (sendBtn) {
+                sendBtn.click();
+                sleep(500);
+                return true;
+            }
+        } catch (e) {
+            console.error("ShareImageTo Error: " + e);
+        }
+        return false;
     }
 }
 
@@ -1358,8 +1574,11 @@ const MessageObject = function (UIObject) {
      * @returns boolean
      */
     this.isVoice = function () {
-        let voice = this.UIObject.find(descContains("语音"))
-        return voice.nonEmpty()
+        if (this.UIObject) {
+            let voice = this.UIObject.find(descContains("语音"))
+            return voice.nonEmpty()
+        }
+        return false; // Fallback
     }
 
     /**
@@ -1368,8 +1587,11 @@ const MessageObject = function (UIObject) {
      * @returns boolean
      */
     this.isPhoto = function () {
-        let photo = this.UIObject.find(descContains("图片"))
-        return photo.nonEmpty()
+        if (this.UIObject) {
+            let photo = this.UIObject.find(descContains("图片"))
+            return photo.nonEmpty()
+        }
+        return false;
     }
 
     /**
@@ -1383,9 +1605,11 @@ const MessageObject = function (UIObject) {
             photo.parent().click()
             sleep(random(500, 1000))
             let save = className("FrameLayout").depth(20).drawingOrder(4).findOnce()
-            save.click()
-            back()
-            return true
+            if (save) {
+                save.click()
+                back()
+                return true
+            }
         }
         return false
     }
@@ -1402,17 +1626,19 @@ const MessageObject = function (UIObject) {
             photo.parent().click()
             sleep(random(500, 1000))
             let more = className("FrameLayout").depth(20).drawingOrder(6).findOnce()
-            more.click()
-            sleep(random(500, 1000))
-            let ocr = text("提取文字").findOnce()
-            if (ocr) {
-                ocr.parent().parent().click()
-                let ts = className("TextView").depth(18).find()
-                if (ts.nonEmpty()) {
-                    ts.forEach(item => {
-                        ocrs.push(item.text())
-                    })
-                    back()
+            if (more) {
+                more.click()
+                sleep(random(500, 1000))
+                let ocr = text("提取文字").findOnce()
+                if (ocr) {
+                    ocr.parent().parent().click()
+                    let ts = className("TextView").depth(18).find()
+                    if (ts.nonEmpty()) {
+                        ts.forEach(item => {
+                            ocrs.push(item.text())
+                        })
+                        back()
+                    }
                 }
             }
             back()
@@ -1443,35 +1669,4 @@ const MessageObject = function (UIObject) {
         let redpacket = this.UIObject.find(textContains("红包"))
         return redpacket.nonEmpty()
     }
-
-    /**
-     * 领取红包
-     * 
-     * @returns string
-     */
-    this.getRedPacket = function () {
-        let redpacket = this.UIObject.findOne(textContains("红包"))
-        if (redpacket) {
-            let isReceived = this.UIObject.findOne(textContains("已"))
-            if (isReceived) {
-                return true
-            }
-            let box = this.UIObject.findOne(className("FrameLayout").depth(22))
-            if (box) {
-                box.click()
-                let open = className("ImageButton").depth(11).findOne(10000)
-                if (open) {
-                    let cover = open.bounds()
-                    click(cover.centerX(), cover.centerY())
-                    className("ImageView").depth(16).findOne(10000)
-                    sleep(random(500, 1000))
-                    back()
-                    return true
-                }
-                back()
-            }
-        }
-        return false
-    }
 }
-

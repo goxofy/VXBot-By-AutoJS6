@@ -68,7 +68,7 @@ bot.register(new ImageBot());
 
 // 视频下载插件
 bot.register(new VideoBot({
-    apiKey: "your-rapidapi-key",
+    serverUrl: "http://127.0.0.1:8080", // 自建服务端口地址，参考 https://github.com/wujunwei928/parse-video
     command: "下载"
 }));
 

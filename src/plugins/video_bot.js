@@ -2,7 +2,13 @@
 function VideoBot(config) {
     this.config = config || {};
     this.name = "VideoBot";
-    this.apiKey = this.config.apiKey;
+
+    // Refined: Accept serverUrl (base) and append path, or fallback to full apiUrl if provided
+    var baseUrl = this.config.serverUrl || "http://127.0.0.1:8080";
+    // Remove trailing slash if present
+    baseUrl = baseUrl.replace(/\/$/, "");
+
+    this.apiUrl = this.config.apiUrl || (baseUrl + "/video/share/url/parse");
     this.triggerCommand = this.config.command || "下载"; // Default trigger
 }
 
@@ -53,80 +59,111 @@ VideoBot.prototype.handleAsync = function (ctx, callback) {
     var self = this;
     threads.start(function () {
         try {
-            // 2. Call API
-            var apiUrl = "https://snap-video3.p.rapidapi.com/download";
-            var res = http.post(apiUrl, {
-                "url": content // The API accepts the raw string (share text)
-            }, {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'x-rapidapi-host': 'snap-video3.p.rapidapi.com',
-                    'x-rapidapi-key': self.apiKey
-                },
+            // 2. Call API (GET Request)
+            var requestUrl = self.apiUrl;
+            var headers = {};
+
+            // [Fix] Handle Basic Auth in URL (e.g. https://user:pass@host...)
+            // AutoJS/OkHttp might not handle it automatically in all cases, so we manually extract it.
+            var authMatch = requestUrl.match(/^(https?:\/\/)([^:@]+):([^:@]+)@(.+)$/);
+            if (authMatch) {
+                var protocol = authMatch[1];
+                var user = authMatch[2];
+                var pass = authMatch[3];
+                var rest = authMatch[4];
+
+                requestUrl = protocol + rest; // Clean URL
+                var auth = android.util.Base64.encodeToString(java.lang.String(user + ":" + pass).getBytes(), 2); // NO_WRAP = 2
+                headers["Authorization"] = "Basic " + auth.trim();
+                console.log("[VideoBot] Extracted Basic Auth credentials for user: " + user);
+            }
+
+            // Append Query Param
+            // [Fix] User reported encoding issues. 
+            // Standard practice IS to encode, but we will print the final URL for debugging.
+            requestUrl += "?url=" + encodeURIComponent(content);
+            console.log("[VideoBot] Final Request URL: " + requestUrl);
+
+            var res = http.get(requestUrl, {
+                headers: headers,
                 timeout: 120000 // 120 seconds timeout
             });
 
-            var body = res.body.json();
+            // [debug] Inspect response before parsing
+            var bodyString = "";
+            try {
+                bodyString = res.body.string(); // Use string() to read once
+            } catch (e) {
+                console.error("[VideoBot] Failed to read response body: " + e);
+            }
+
+            console.log("[VideoBot] Response Body (First 100 chars): " + bodyString.substring(0, 100));
+
+            var body = null;
+            try {
+                body = JSON.parse(bodyString);
+            } catch (e) {
+                console.error("[VideoBot] JSON Parse Error. The server returned non-JSON content.");
+                console.error("[VideoBot] Full Response: " + bodyString);
+                callback(ctx, { type: "text", content: "接口返回格式错误，请检查日志" });
+                return;
+            }
+
             if (!body) {
-                console.error("[VideoBot] Empty response");
+                console.error("[VideoBot] Empty JSON object");
+                callback(ctx, { type: "text", content: "解析失败: 空响应" });
                 return;
             }
 
             // 3. Parse Response
-            // Response format: { medias: [ { url: "..." } ] }
-            // The url in medias[0] is an intermediate one: 
-            // https://sp2.snapapi.space/download.php?url=ENCODED_URL...
-            if (body.medias && body.medias.length > 0) {
-                var intermediateUrl = body.medias[0].url;
-                // console.log("[VideoBot] Intermediate URL: " + intermediateUrl);
+            // [Fix] Handle "data" wrapper if present (common in APIs)
+            // Log shows: {"code":200,"msg":"...","data":{...}}
+            var data = body;
+            if (body.data && typeof body.data === 'object') {
+                data = body.data;
+            }
 
-                // Extract the real URL from the intermediate URL
-                // The intermediate URL is like: https://sp2.snapapi.space/download.php?url=ENCODED_URL...
-                // We need to get the value of the 'url' parameter, which is the real video URL.
-                // It might also have other parameters like '&title=...' after the 'url' parameter.
-                var realUrl = null;
-                if (intermediateUrl && intermediateUrl.indexOf("url=") > -1) {
-                    var realUrlEncoded = intermediateUrl.split("url=")[1];
-                    if (realUrlEncoded.indexOf("&") > -1) {
-                        realUrlEncoded = realUrlEncoded.split("&")[0];
-                    }
-                    var realUrl = decodeURIComponent(realUrlEncoded);
-                    // console.log("[VideoBot] Real Video URL: " + realUrl);
+            if (data.video_url) {
+                var realUrl = data.video_url;
+                var videoTitle = data.title || body.title || "无标题";
 
-                    // 4. Download Video
-                    var fileName = "vxbot_video_" + new Date().getTime() + ".mp4";
-                    var savePath = "/sdcard/DCIM/Camera/" + fileName;
+                // 4. Download Video
+                var fileName = "vxbot_video_" + new Date().getTime() + ".mp4";
+                var savePath = "/sdcard/DCIM/Camera/" + fileName;
 
-                    console.log("[VideoBot] Downloading to: " + savePath);
-                    var videoRes = http.get(realUrl);
-                    if (videoRes.statusCode === 200) {
-                        files.writeBytes(savePath, videoRes.body.bytes());
-                        media.scanFile(savePath); // Refresh Gallery
-                        console.log("[VideoBot] Download Complete");
+                console.log("[VideoBot] Downloading to: " + savePath);
+                var videoRes = http.get(realUrl);
+                if (videoRes.statusCode === 200) {
+                    files.writeBytes(savePath, videoRes.body.bytes());
+                    // media.scanFile(savePath); // Refresh Gallery
 
-                        // 5. Callback with special type
-                        callback(ctx, {
-                            type: "video",
-                            path: savePath,
-                            text: "下载完成: " + (body.title || "无标题")
-                        });
+                    // [Fix] Use Intent to scan file (more reliable)
+                    var intent = new android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE);
+                    intent.setData(android.net.Uri.fromFile(new java.io.File(savePath)));
+                    context.sendBroadcast(intent);
 
-                    } else {
-                        console.error("[VideoBot] Download failed: " + videoRes.statusCode);
-                        callback(ctx, { type: "text", content: "视频下载失败: " + videoRes.statusCode });
-                    }
+                    console.log("[VideoBot] Download Complete");
+
+                    // 5. Callback with special type
+                    callback(ctx, {
+                        type: "video",
+                        path: savePath,
+                        text: "下载完成: " + videoTitle
+                    });
+
                 } else {
-                    console.error("[VideoBot] Cannot parse intermediate URL");
-                    callback(ctx, { type: "text", content: "解析下载链接失败" });
+                    console.error("[VideoBot] Download failed: " + videoRes.statusCode);
+                    callback(ctx, { type: "text", content: "视频下载失败: " + videoRes.statusCode });
                 }
             } else {
-                console.error("[VideoBot] No media found");
-                callback(ctx, { type: "text", content: "未找到视频资源" });
+                console.error("[VideoBot] No video_url found in response");
+                console.error("[VideoBot] Parsed Data Object: " + JSON.stringify(data));
+                callback(ctx, { type: "text", content: "未找到视频直链" });
             }
 
         } catch (e) {
             console.error("[VideoBot] Error: " + e);
-            // callback(ctx, { type: "text", content: "处理出错: " + e });
+            callback(ctx, { type: "text", content: "处理出错: " + e });
         }
     });
 

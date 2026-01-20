@@ -23,8 +23,8 @@ bot.register(new ImageBot());
 
 // [Video] 视频下载插件
 bot.register(new VideoBot({
-    apiKey: "", // 这个 API 的 KEY: https://rapidapi.com/tuan2308/api/snap-video3
-    command: "" // 触发指令
+    serverUrl: "http://127.0.0.1:8080", // 自建服务端口地址，参考 https://github.com/wujunwei928/parse-video
+    command: "下载" // 触发指令
 }));
 
 // [OpenAI] AI 对话插件 / 兜底插件

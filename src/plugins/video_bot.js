@@ -44,8 +44,14 @@ VideoBot.prototype.handleAsync = function (ctx, callback) {
     // [Optimization] Send immediate feedback SYNCHRONOUSLY while still in chat
     // This avoids one round of entering/exiting the chat
     if (ctx.vchat && ctx.vchat.isChat()) {
+        // Format: Re: <content>  - <sender> (matching bot.js format)
         var originalMsg = ctx.text.length > 30 ? ctx.text.substring(0, 30) + "..." : ctx.text;
-        var feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在下载视频请稍候...";
+        var feedbackText;
+        if (!ctx.isPrivate && ctx.user) {
+            feedbackText = "Re: " + originalMsg + "  - " + ctx.user + "\n------------------------------\n正在下载视频请稍候...";
+        } else {
+            feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在下载视频请稍候...";
+        }
 
         // Use @mention for group chats
         if (!ctx.isPrivate && ctx.user) {

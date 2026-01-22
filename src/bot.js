@@ -424,10 +424,31 @@ Bot.prototype.processSendQueue = function () {
             var finalText = replyData.content || "";
 
             // [Feature] Add original message reference
+            // Format: Re: <content>  - <sender>
             if (task.text && finalText) {
-                // Truncate original message if too long
-                var originalMsg = task.text.length > 30 ? task.text.substring(0, 30) + "..." : task.text;
-                finalText = "Re: " + originalMsg + "\n------------------------------\n" + finalText;
+                var displayContent = task.text;
+                var quotedSender = null;
+
+                // [Parse] Detect quoted message format: "Sender：Content" or "Sender: Content"
+                // WeChat quotes are formatted as "SenderName：QuotedContent"
+                var quoteMatch = task.text.match(/^(.+?)[：:]\s*(.+)$/);
+                if (quoteMatch) {
+                    quotedSender = quoteMatch[1].trim();
+                    displayContent = quoteMatch[2].trim();
+                }
+
+                // Truncate content if too long (keep ~30 chars for readability)
+                var originalMsg = displayContent.length > 30 ? displayContent.substring(0, 30) + "..." : displayContent;
+
+                // Build Re: prefix with sender suffix
+                // Priority: quotedSender (from parsed quote) > task.user (message sender)
+                var senderSuffix = quotedSender || (task.user && !task.isPrivate ? task.user : null);
+
+                if (senderSuffix) {
+                    finalText = "Re: " + originalMsg + "  - " + senderSuffix + "\n------------------------------\n" + finalText;
+                } else {
+                    finalText = "Re: " + originalMsg + "\n------------------------------\n" + finalText;
+                }
             }
 
             if (!task.isPrivate && task.user) {

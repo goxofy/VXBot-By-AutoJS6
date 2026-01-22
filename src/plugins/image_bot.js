@@ -65,9 +65,14 @@ ImageBot.prototype.handleAsync = function (ctx, callback) {
     // This avoids one round of entering/exiting the chat
     // ctx.vchat is safe to use here because we're still in the main polling thread
     if (ctx.vchat && ctx.vchat.isChat()) {
-        // Add Re: prefix to match the reply format
+        // Format: Re: <content>  - <sender> (matching bot.js format)
         var originalMsg = ctx.text.length > 30 ? ctx.text.substring(0, 30) + "..." : ctx.text;
-        var feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在寻找美图，请稍候...";
+        var feedbackText;
+        if (!ctx.isPrivate && ctx.user) {
+            feedbackText = "Re: " + originalMsg + "  - " + ctx.user + "\n------------------------------\n正在寻找美图，请稍候...";
+        } else {
+            feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在寻找美图，请稍候...";
+        }
 
         // Use @mention for group chats
         if (!ctx.isPrivate && ctx.user) {

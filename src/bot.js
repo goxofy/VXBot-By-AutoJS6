@@ -425,30 +425,52 @@ Bot.prototype.processSendQueue = function () {
 
             // [Feature] Add original message reference
             // Format: 
-            //   - Quoted message: Re: <content>  - <quoted_sender>
+            //   - Quote + user message: Re: <user_msg>  / <quoted_content>  - <quoted_sender>
+            //   - Quote only: Re: <quoted_content>  - <quoted_sender>
             //   - Normal message: Re: <content>
             if (task.text && finalText) {
-                var displayContent = task.text;
+                var userMessage = null;
+                var quotedContent = null;
                 var quotedSender = null;
 
-                // [Parse] Detect quoted message format: "Sender：Content" or "Sender: Content"
-                // WeChat quotes are formatted as "SenderName：QuotedContent"
-                var quoteMatch = task.text.match(/^(.+?)[：:]\s*(.+)$/);
-                if (quoteMatch) {
-                    quotedSender = quoteMatch[1].trim();
-                    displayContent = quoteMatch[2].trim();
-                }
+                // [Parse] Actual format from logs: "UserMessage Sender：QuotedContent"
+                // Example: "还有星期几？ Tink：今天是几月几号" 
+                //   -> user=还有星期几？, sender=Tink, quote=今天是几月几号
 
-                // Truncate content if too long (keep ~30 chars for readability)
-                var originalMsg = displayContent.length > 30 ? displayContent.substring(0, 30) + "..." : displayContent;
-
-                // Build Re: prefix
-                // ONLY add sender suffix when we detected a quote pattern
-                if (quotedSender) {
-                    finalText = "Re: " + originalMsg + "  - " + quotedSender + "\n------------------------------\n" + finalText;
+                // Pattern: UserMessage + space + Sender + colon + QuotedContent
+                var fullMatch = task.text.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
+                if (fullMatch) {
+                    // Has both user message and quote
+                    userMessage = fullMatch[1].trim();
+                    quotedSender = fullMatch[2].trim();
+                    quotedContent = fullMatch[3].trim();
                 } else {
-                    finalText = "Re: " + originalMsg + "\n------------------------------\n" + finalText;
+                    // Try simple quote pattern: "Sender：QuotedContent" (no user message)
+                    var simpleMatch = task.text.match(/^(.+?)[：:]\s*(.+)$/);
+                    if (simpleMatch) {
+                        quotedSender = simpleMatch[1].trim();
+                        quotedContent = simpleMatch[2].trim();
+                    }
                 }
+
+                // Build Re: prefix based on what we parsed
+                var rePrefix;
+                if (userMessage && quotedSender && quotedContent) {
+                    // User message + quote: "Re: UserMsg  / QuoteContent  - Sender"
+                    var truncatedUser = userMessage.length > 20 ? userMessage.substring(0, 20) + "..." : userMessage;
+                    var truncatedQuote = quotedContent.length > 15 ? quotedContent.substring(0, 15) + "..." : quotedContent;
+                    rePrefix = "Re: " + truncatedUser + "  /  " + truncatedQuote + " - " + quotedSender;
+                } else if (quotedSender && quotedContent) {
+                    // Quote only: "Re: QuoteContent  - Sender"
+                    var truncatedQuote = quotedContent.length > 30 ? quotedContent.substring(0, 30) + "..." : quotedContent;
+                    rePrefix = "Re: " + truncatedQuote + " - " + quotedSender;
+                } else {
+                    // Normal message: "Re: Content"
+                    var truncatedMsg = task.text.length > 30 ? task.text.substring(0, 30) + "..." : task.text;
+                    rePrefix = "Re: " + truncatedMsg;
+                }
+
+                finalText = rePrefix + "\n------------------------------\n" + finalText;
             }
 
             if (!task.isPrivate && task.user) {

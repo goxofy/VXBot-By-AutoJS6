@@ -146,12 +146,39 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     // Ideally we should refactor handle() to share logic, 
     // but for now let's copy the essential context checks to avoid breaking old sync flow.
 
+    var originalText = ctx.text;
     var text = ctx.text;
+
+    // [Fix] Strip quote format before sending to AI
+    // If message contains "UserMsg Sender：QuotedContent", extract user message + quoted content
+    // This prevents AI from mimicking the quote format in responses
+    var fullQuoteMatch = text.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
+    if (fullQuoteMatch) {
+        // User message + quote: combine both for context but without the sender prefix
+        var userMsg = fullQuoteMatch[1].trim();
+        var quotedContent = fullQuoteMatch[3].trim();
+        text = userMsg + " (引用: " + quotedContent + ")";
+    } else {
+        // Try simple quote pattern: "Sender：Content"
+        var simpleQuoteMatch = text.match(/^(.+?)[：:]\s*(.+)$/);
+        if (simpleQuoteMatch) {
+            text = simpleQuoteMatch[2].trim(); // Just the content, no sender prefix
+        }
+    }
+
+    console.log("[OpenAI] Cleaned text: " + text.substring(0, 30));
+
     var sessionName = ctx.notice ? ctx.notice.getTitle() : (ctx.sender || "Unknown");
 
     // Filter Logic
-    if (this.config.whitelist.length > 0 && this.config.whitelist.indexOf(sessionName) === -1) return false;
-    if (this.config.blacklist.length > 0 && this.config.blacklist.indexOf(sessionName) > -1) return false;
+    if (this.config.whitelist.length > 0 && this.config.whitelist.indexOf(sessionName) === -1) {
+        console.log("[OpenAI] Rejected: not in whitelist");
+        return false;
+    }
+    if (this.config.blacklist.length > 0 && this.config.blacklist.indexOf(sessionName) > -1) {
+        console.log("[OpenAI] Rejected: in blacklist");
+        return false;
+    }
 
     // Context Key
     var contextKey = ctx.user ? (sessionName + "_" + ctx.user) : sessionName;
@@ -207,6 +234,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     // [Async] Start Thread for API Call
     var self = this;
     var inputText = text; // Capture for closure
+    console.log("[OpenAI] Starting API thread for: " + text.substring(0, 20) + "...");
     threads.start(function () {
         try {
             var reply = self.callOpenAI(userContext.history);

@@ -1191,8 +1191,7 @@ export default {
                         continue;
                     }
 
-                    // Debug: Log each collected part
-                    console.log(">> Collecting text part: [" + txt.substring(0, 50) + "...]");
+
                     textParts.push(txt);
                 }
 

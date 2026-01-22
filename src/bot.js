@@ -424,7 +424,9 @@ Bot.prototype.processSendQueue = function () {
             var finalText = replyData.content || "";
 
             // [Feature] Add original message reference
-            // Format: Re: <content>  - <sender>
+            // Format: 
+            //   - Quoted message: Re: <content>  - <quoted_sender>
+            //   - Normal message: Re: <content>
             if (task.text && finalText) {
                 var displayContent = task.text;
                 var quotedSender = null;
@@ -440,12 +442,10 @@ Bot.prototype.processSendQueue = function () {
                 // Truncate content if too long (keep ~30 chars for readability)
                 var originalMsg = displayContent.length > 30 ? displayContent.substring(0, 30) + "..." : displayContent;
 
-                // Build Re: prefix with sender suffix
-                // Priority: quotedSender (from parsed quote) > task.user (message sender)
-                var senderSuffix = quotedSender || (task.user && !task.isPrivate ? task.user : null);
-
-                if (senderSuffix) {
-                    finalText = "Re: " + originalMsg + "  - " + senderSuffix + "\n------------------------------\n" + finalText;
+                // Build Re: prefix
+                // ONLY add sender suffix when we detected a quote pattern
+                if (quotedSender) {
+                    finalText = "Re: " + originalMsg + "  - " + quotedSender + "\n------------------------------\n" + finalText;
                 } else {
                     finalText = "Re: " + originalMsg + "\n------------------------------\n" + finalText;
                 }

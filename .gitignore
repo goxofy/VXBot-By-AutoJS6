@@ -3,4 +3,4 @@ node_modules
 package-lock.json
 dist
 Agent.md
-demo.prod.js
+demo.js

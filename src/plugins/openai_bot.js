@@ -25,6 +25,7 @@ function OpenAIBot(config) {
     }
 
     this.config.model = this.config.model || "gpt-3.5-turbo";
+    this.config.requestTimeout = this.config.requestTimeout || 90000; // 90 seconds default
     this.config.contextTimeout = this.config.contextTimeout || 2 * 60 * 60 * 1000;
     this.config.whitelist = this.config.whitelist || [];
     this.config.blacklist = this.config.blacklist || [];
@@ -261,12 +262,13 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
 };
 
 OpenAIBot.prototype.callOpenAI = function (messages) {
-    console.log("Calling OpenAI API... (Timeout: 90s)");
+    var timeout = this.config.requestTimeout;
+    console.log("Calling OpenAI API... (Timeout: " + (timeout / 1000) + "s)");
     var res = http.postJson(this.config.endpoint, {
         model: this.config.model,
         messages: messages
     }, {
-        timeout: 90000, // 90 seconds
+        timeout: timeout,
         headers: {
             "Authorization": "Bearer " + this.config.apiKey,
             "Content-Type": "application/json"

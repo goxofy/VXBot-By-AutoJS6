@@ -1,6 +1,19 @@
+# VXBot gitignore
+
+# macOS
 .DS_Store
-node_modules
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Lock files
 package-lock.json
-dist
+
+# Private config (contains API keys)
+config.json
+
+# Development notes
 Agent.md
-demo.js

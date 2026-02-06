@@ -30,28 +30,26 @@
 *   安装 VX 8.0.39 (版本差异可能导致 UI 查找失败)
 *   安装 Node.js (用于本地构建)
 
-### 2. 配置项目
+### 2. 构建项目
 ```bash
 # 安装依赖
 npm install
 
-# 复制配置模板
-cp demo.js.example demo.js
-
-# 编辑 demo.js，填入你的 API Key 等配置
-```
-
-### 3. 构建项目
-```bash
+# 构建
 npm run demo
 ```
-构建完成后，会在 `dist/` 目录下生成 **`VXBot.js`**。
+构建完成后，会在 `dist/` 目录下生成 `VXBot.js`。
+
+### 3. 配置
+将 `config.json.example` 复制并重命名为 `config.json`，和 `VXBot.js` 放在同一目录，编辑填入你的实际配置。
 
 ### 4. 运行
-1.  将 `dist/VXBot.js` 发送到手机
-2.  在 AutoJS6 中运行该脚本
+1.  将 `VXBot.js` 和 `config.json` 发送到手机同一目录
+2.  在 AutoJS6 中运行 `VXBot.js`
 3.  授予必要的权限 (无障碍服务、悬浮窗)
 4.  脚本会自动启动 VX 并开始工作
+
+> **💡 提示**: 修改 `config.json` 后只需重启脚本即可生效，无需重新构建！
 
 ## 💬 指令与功能
 
@@ -64,45 +62,61 @@ npm run demo
 
 ## ⚙️ 配置 (Configuration)
 
-复制 `demo.js.example` 为 `demo.js` 后进行修改：
+配置文件查找顺序:
+1. **脚本同目录** `./config.json` (推荐)
+2. **全局路径** `/sdcard/VXBot/config.json`
 
-```javascript
-// 白名单配置 (留空则响应所有会话)
-const WHITELIST = ["好友A", "技术交流群"];
+参考 `config.json.example` 创建配置文件：
 
-// 图片插件
-bot.register(new ImageBot());
-
-// 视频下载插件
-bot.register(new VideoBot({
-    serverUrl: "http://127.0.0.1:8080", // 自建服务端口地址，参考 https://github.com/wujunwei928/parse-video
-    command: "下载"  // 触发指令
-}));
-
-// OpenAI 插件
-bot.register(new OpenAIBot({
-    apiKey: "sk-xxxx",           // OpenAI API Key
-    baseUrl: "https://api.openai.com/v1",  // 支持自定义 API 地址
-    model: "gpt-4",              // 模型名称
-    whitelist: WHITELIST
-}));
-
-// 启动配置
-bot.start({
-    polling: true,               // 开启轮询
-    interval: 500,               // 轮询间隔 (毫秒)
-    whitelist: WHITELIST,        // 会话白名单
-    mentionString: "@Bot",       // 群聊触发词，留空则响应所有消息
-    asyncMode: true              // 异步模式 (推荐)
-});
+```json
+{
+  "whitelist": ["好友A", "技术交流群"],
+  "mentionString": "@Bot",
+  "polling": {
+    "enabled": true,
+    "interval": 500
+  },
+  "asyncMode": true,
+  "plugins": {
+    "openai": {
+      "enabled": true,
+      "apiKey": "sk-xxxx",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4"
+    },
+    "video": {
+      "enabled": true,
+      "serverUrl": "http://127.0.0.1:8080",
+      "command": "下载"
+    },
+    "image": {
+      "enabled": true,
+      "command": "发图"
+    }
+  }
+}
 ```
+
+### 配置项说明
+
+| 配置项 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `whitelist` | Array | 会话白名单，留空则响应所有会话 |
+| `mentionString` | String | 群聊触发词 (如 `@Bot`)，留空则响应所有消息 |
+| `polling.enabled` | Boolean | 是否开启主动轮询 |
+| `polling.interval` | Number | 轮询间隔 (毫秒) |
+| `asyncMode` | Boolean | 异步模式，推荐开启 |
+| `plugins.*.enabled` | Boolean | 各插件开关 |
+
+> **💡 提示**: 修改配置后只需重启 AutoJS6 脚本即可生效，无需重新构建！
 
 ## 📁 项目结构
 
 ```
 VXBot/
-├── demo.js.example      # 配置模板
-├── demo.js              # 你的配置 (gitignore)
+├── config.json.example  # 配置模板
+├── config.json          # 你的配置 (gitignore)
+├── demo.js              # 入口脚本 (gitignore)
 ├── package.json         # 项目依赖
 ├── dist/
 │   └── VXBot.js         # 构建产物

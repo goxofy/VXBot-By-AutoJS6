@@ -1,0 +1,38 @@
+{
+  "_comment": "VXBot 配置文件 - 复制到 /sdcard/VXBot/config.json 使用",
+  
+  "whitelist": [
+    "好友昵称",
+    "群聊名称"
+  ],
+  
+  "mentionString": "@机器人名",
+  
+  "polling": {
+    "enabled": true,
+    "interval": 500
+  },
+  
+  "asyncMode": true,
+  
+  "plugins": {
+    "openai": {
+      "enabled": true,
+      "apiKey": "sk-your-api-key-here",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-3.5-turbo",
+      "requestTimeout": 90000,
+      "contextTimeout": 1200000,
+      "systemPrompt": "You are a helpful assistant."
+    },
+    "video": {
+      "enabled": true,
+      "serverUrl": "http://127.0.0.1:8080",
+      "command": "下载"
+    },
+    "image": {
+      "enabled": true,
+      "command": "发图"
+    }
+  }
+}

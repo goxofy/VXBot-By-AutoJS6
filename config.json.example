@@ -21,8 +21,8 @@
       "apiKey": "sk-your-api-key-here",
       "baseUrl": "https://api.openai.com/v1",
       "model": "gpt-3.5-turbo",
-      "requestTimeout": 90000,
-      "contextTimeout": 1200000,
+      "requestTimeout": 90000,  // OpenAI API 请求超时时间 (毫秒)
+      "contextTimeout": 1200000, // 上下文超时时间 (毫秒)
       "systemPrompt": "You are a helpful assistant."
     },
     "video": {

@@ -23,7 +23,10 @@
       "model": "gpt-3.5-turbo",
       "requestTimeout": 90000,  // OpenAI API 请求超时时间 (毫秒)
       "contextTimeout": 1200000, // 上下文超时时间 (毫秒)
-      "systemPrompt": "You are a helpful assistant."
+      "systemPrompt": "You are a helpful assistant.",
+      "customHeaders": {
+        "X-Custom-Header": "your-value"
+      }
     },
     "video": {
       "enabled": true,

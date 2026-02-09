@@ -120,6 +120,7 @@ if (openaiConfig.enabled !== false) {
         requestTimeout: openaiConfig.requestTimeout || 90000,
         contextTimeout: openaiConfig.contextTimeout || (20 * 60 * 1000),
         systemPrompt: openaiConfig.systemPrompt || "You are a helpful assistant.",
+        customHeaders: openaiConfig.customHeaders || {},
         whitelist: WHITELIST,
         blacklist: openaiConfig.blacklist || []
     }));

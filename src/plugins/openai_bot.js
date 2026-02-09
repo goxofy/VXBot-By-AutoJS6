@@ -30,6 +30,7 @@ function OpenAIBot(config) {
     this.config.whitelist = this.config.whitelist || [];
     this.config.blacklist = this.config.blacklist || [];
     this.config.systemPrompt = this.config.systemPrompt || "You are a helpful assistant.";
+    this.config.customHeaders = this.config.customHeaders || {}; // Custom HTTP headers
 
     // Context Store: { "sessionName": { history: [], lastActive: timestamp } }
     this.contexts = {};
@@ -264,15 +265,27 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
 OpenAIBot.prototype.callOpenAI = function (messages) {
     var timeout = this.config.requestTimeout;
     console.log("Calling OpenAI API... (Timeout: " + (timeout / 1000) + "s)");
+
+    // Build headers: start with defaults, then merge custom headers
+    var headers = {
+        "Authorization": "Bearer " + this.config.apiKey,
+        "Content-Type": "application/json"
+    };
+
+    // Merge custom headers (can override defaults)
+    var customHeaders = this.config.customHeaders;
+    for (var key in customHeaders) {
+        if (customHeaders.hasOwnProperty(key)) {
+            headers[key] = customHeaders[key];
+        }
+    }
+
     var res = http.postJson(this.config.endpoint, {
         model: this.config.model,
         messages: messages
     }, {
         timeout: timeout,
-        headers: {
-            "Authorization": "Bearer " + this.config.apiKey,
-            "Content-Type": "application/json"
-        }
+        headers: headers
     });
 
     var body = res.body.json();

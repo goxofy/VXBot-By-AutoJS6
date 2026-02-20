@@ -525,4 +525,17 @@ Bot.prototype.handleNotification = function (notice) {
     }
 };
 
+/**
+ * Start RelayServer attached to this bot instance.
+ * @param {object} RelayServer - RelayServer constructor
+ * @param {object} config - Relay config (listenPort, webhookSecret, etc.)
+ * @returns {object} RelayServer instance
+ */
+Bot.prototype.startRelayServer = function (RelayServer, config) {
+    var server = new RelayServer(config, this);
+    server.start();
+    this.relayServer = server;
+    return server;
+};
+
 export { Bot };

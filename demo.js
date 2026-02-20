@@ -2,6 +2,8 @@ import { Bot } from './src/bot.js'
 import OpenAIBot from './src/plugins/openai_bot.js'
 import ImageBot from './src/plugins/image_bot.js'
 import VideoBot from './src/plugins/video_bot.js'
+import RelayClient from './src/relay/relay_client.js'
+import RelayServer from './src/relay/relay_server.js'
 
 /**
  * VXBot 启动脚本
@@ -107,9 +109,22 @@ if (videoConfig.enabled !== false) {
     console.log("VideoBot 已注册, 触发指令: " + (videoConfig.command || "下载"));
 }
 
-// [OpenAIBot] AI 对话插件 (兜底)
+// [OpenAIBot] AI 对话插件 (兜底) - 仅在 Relay 未启用时使用
+var relayConfig = config.relay || {};
+var RELAY_ENABLED = relayConfig.enabled === true;
+
 var openaiConfig = pluginsConfig.openai || {};
-if (openaiConfig.enabled !== false) {
+if (RELAY_ENABLED) {
+    // Relay 模式: 使用 RelayClient 替代 OpenAIBot
+    bot.register(new RelayClient({
+        openclawWebhookUrl: relayConfig.openclawWebhookUrl || "",
+        webhookSecret: relayConfig.webhookSecret || "",
+        requestTimeout: relayConfig.requestTimeout || 30000,
+        whitelist: WHITELIST,
+        blacklist: openaiConfig.blacklist || []
+    }));
+    console.log("RelayClient 已注册 (OpenClaw 模式)");
+} else if (openaiConfig.enabled !== false) {
     if (!openaiConfig.apiKey || openaiConfig.apiKey.indexOf("your-api-key") > -1) {
         console.warn("警告: OpenAI API Key 未配置或使用默认值");
     }
@@ -134,6 +149,7 @@ console.log("VXBot 启动中...");
 console.log("白名单: " + JSON.stringify(WHITELIST));
 console.log("轮询: " + (POLLING_ENABLED ? "开启 (" + POLLING_INTERVAL + "ms)" : "关闭"));
 console.log("异步模式: " + (ASYNC_MODE ? "开启" : "关闭"));
+console.log("Relay 模式: " + (RELAY_ENABLED ? "开启 (端口 " + (relayConfig.listenPort || 8899) + ")" : "关闭"));
 console.log("====================================");
 
 bot.start({
@@ -143,3 +159,11 @@ bot.start({
     mentionString: MENTION_STRING,
     asyncMode: ASYNC_MODE
 });
+
+// Start RelayServer after bot.start() so queueLock is initialized
+if (RELAY_ENABLED) {
+    bot.startRelayServer(RelayServer, {
+        listenPort: relayConfig.listenPort || 8899,
+        webhookSecret: relayConfig.webhookSecret || ""
+    });
+}

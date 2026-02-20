@@ -1,28 +1,36 @@
 {
   "_comment": "VXBot 配置文件 - 复制到 /sdcard/VXBot/config.json 使用",
-  
+
   "whitelist": [
     "好友昵称",
     "群聊名称"
   ],
-  
+
   "mentionString": "@机器人名",
-  
+
   "polling": {
     "enabled": true,
     "interval": 500
   },
-  
+
   "asyncMode": true,
-  
+
+  "relay": {
+    "enabled": false,
+    "openclawWebhookUrl": "http://192.168.1.100:8080/api/channels/wechat-vxbot/webhook",
+    "webhookSecret": "your-secret-here",
+    "listenPort": 8899,
+    "requestTimeout": 30000
+  },
+
   "plugins": {
     "openai": {
       "enabled": true,
       "apiKey": "sk-your-api-key-here",
       "baseUrl": "https://api.openai.com/v1",
       "model": "gpt-3.5-turbo",
-      "requestTimeout": 90000,  // OpenAI API 请求超时时间 (毫秒)
-      "contextTimeout": 1200000, // 上下文超时时间 (毫秒)
+      "requestTimeout": 90000,
+      "contextTimeout": 1200000,
       "systemPrompt": "You are a helpful assistant.",
       "customHeaders": {
         "X-Custom-Header": "your-value"

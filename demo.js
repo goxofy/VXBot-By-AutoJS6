@@ -116,13 +116,25 @@ if (openaiConfig.enabled !== false) {
     bot.register(new OpenAIBot({
         apiKey: openaiConfig.apiKey || "",
         baseUrl: openaiConfig.baseUrl || "https://api.openai.com/v1",
+        imageApiKey: openaiConfig.imageApiKey || "",
+        imageBaseUrl: openaiConfig.imageBaseUrl || "",
+        endpoint: openaiConfig.endpoint || "",
         model: openaiConfig.model || "gpt-3.5-turbo",
         requestTimeout: openaiConfig.requestTimeout || 90000,
         contextTimeout: openaiConfig.contextTimeout || (20 * 60 * 1000),
         systemPrompt: openaiConfig.systemPrompt || "You are a helpful assistant.",
         customHeaders: openaiConfig.customHeaders || {},
         whitelist: WHITELIST,
-        blacklist: openaiConfig.blacklist || []
+        blacklist: openaiConfig.blacklist || [],
+        imageEnabled: openaiConfig.imageEnabled === true,
+        imageKeywords: openaiConfig.imageKeywords || [],
+        imageBackend: openaiConfig.imageBackend || "",
+        imageEndpoint: openaiConfig.imageEndpoint || "",
+        imageModel: openaiConfig.imageModel || "",
+        imageSize: openaiConfig.imageSize || "",
+        imageResponseFormat: openaiConfig.imageResponseFormat || "",
+        imagePromptModel: openaiConfig.imagePromptModel || "",
+        imagePromptSystemPrompt: openaiConfig.imagePromptSystemPrompt || ""
     }));
     console.log("OpenAIBot 已注册");
 }

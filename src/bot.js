@@ -1,6 +1,24 @@
 
 import vchat from './modules/vchat.js';
 
+function normalizeSessionName(name) {
+    return (name || "").replace(/\(\d+\)$/, "").trim();
+}
+
+function isWhitelistedSession(sessionName, whitelist) {
+    if (!whitelist || whitelist.length === 0) return true;
+
+    var normalizedSessionName = normalizeSessionName(sessionName);
+    for (var i = 0; i < whitelist.length; i++) {
+        var target = normalizeSessionName(whitelist[i]);
+        if (normalizedSessionName === target || normalizedSessionName.indexOf(target) > -1) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function getAllTexts(item) {
     var texts = [];
     if (!item) return texts;
@@ -21,6 +39,19 @@ function getAllDescs(item) {
         if (d) descs.push(d);
     }
     return descs;
+}
+
+function snapshotReplyTask(ctx, reply) {
+    ctx = ctx || {};
+    return {
+        sessionName: ctx.sessionName || normalizeSessionName(ctx.sender),
+        sender: ctx.sender || ctx.sessionName || "",
+        user: ctx.user || "",
+        isPrivate: ctx.isPrivate === true,
+        text: ctx.text || "",
+        reply: reply,
+        timestamp: new Date().getTime()
+    };
 }
 
 function Bot() {
@@ -122,19 +153,7 @@ Bot.prototype.start = function (config) {
                             if (matchName === "Unknown" && allContent.length > 0) matchName = allContent[0];
 
                             // Whitelist
-                            var isAllowed = false;
-                            if (self.whitelist.length > 0) {
-                                for (var w = 0; w < self.whitelist.length; w++) {
-                                    var target = self.whitelist[w];
-                                    if (matchName.indexOf(target) > -1) {
-                                        isAllowed = true;
-                                        matchTarget = target;
-                                        break;
-                                    }
-                                }
-                            } else {
-                                isAllowed = true;
-                            }
+                            var isAllowed = isWhitelistedSession(matchName, self.whitelist);
 
                             // AtMe Check
                             var isAtMe = false;
@@ -153,8 +172,13 @@ Bot.prototype.start = function (config) {
                                     click(rect.centerX(), rect.centerY());
                                     sleep(1000);
 
+                                    var actualTitle = matchName;
+                                    if (vchat.isChat()) {
+                                        actualTitle = vchat.getTitle() || matchName;
+                                    }
+
                                     // [Action] Read Only
-                                    self.readAndDispatch(matchName, isAtMe);
+                                    self.readAndDispatch(actualTitle, isAtMe);
 
                                     // [Fix] Quick recheck for messages that arrived during processing
                                     // Only wait once (300ms) and only reprocess if message count increased
@@ -164,7 +188,7 @@ Bot.prototype.start = function (config) {
                                         var countAfter = vchat.getRecentMessages().length;
                                         if (countAfter > countBefore) {
                                             console.log("Quick recheck: Found " + (countAfter - countBefore) + " new message(s)");
-                                            self.readAndDispatch(matchName, false);
+                                            self.readAndDispatch(vchat.getTitle() || actualTitle, false);
                                         }
                                     }
 
@@ -197,6 +221,8 @@ Bot.prototype.start = function (config) {
 Bot.prototype.readAndDispatch = function (title, isAtMe) {
     if (!vchat.isChat()) return;
 
+    var normalizedTitle = normalizeSessionName(title);
+
     // Retry Loop for loading
     var msgs = [];
     for (var t = 0; t < 5; t++) {
@@ -208,7 +234,7 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
     if (!msgs || msgs.length === 0) return;
 
     var latestMsg = msgs[msgs.length - 1];
-    var isPrivateChat = (title === latestMsg.sender || title.indexOf(latestMsg.sender) > -1 || latestMsg.sender.indexOf(title) > -1);
+    var isPrivateChat = (normalizedTitle === latestMsg.sender || normalizedTitle.indexOf(latestMsg.sender) > -1 || latestMsg.sender.indexOf(normalizedTitle) > -1);
 
     // Filter Logic
     if (!isPrivateChat && this.mentionString) {
@@ -256,7 +282,7 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
             console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + cleanText.substring(0, 50) + "...]");
 
             var context = {
-                sessionName: title,
+                sessionName: normalizedTitle,
                 isPolling: true,
                 text: cleanText,
                 sender: title,
@@ -277,10 +303,7 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                         console.log("Async Work Done. Enqueuing Reply: " + (typeof replyText === 'string' ? replyText : "[object Object]"));
                         self.queueLock.lock();
                         try {
-                            self.sendQueue.push({
-                                task: ctx,
-                                data: replyText
-                            });
+                            self.sendQueue.push(snapshotReplyTask(ctx, replyText));
                         } finally {
                             self.queueLock.unlock();
                         }
@@ -310,13 +333,7 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
  * Push to Send Queue
  */
 Bot.prototype.enqueueReply = function (ctx, replyText) {
-    this.sendQueue.push({
-        sessionName: ctx.sender, // Need full name for search
-        reply: replyText,
-        isPrivate: ctx.isPrivate,
-        user: ctx.user,
-        timestamp: new Date().getTime()
-    });
+    this.sendQueue.push(snapshotReplyTask(ctx, replyText));
 };
 
 /**

@@ -1,32 +1,49 @@
 {
   "_comment": "VXBot 配置文件 - 复制到 /sdcard/VXBot/config.json 使用",
-  
+
   "whitelist": [
     "好友昵称",
     "群聊名称"
   ],
-  
+
   "mentionString": "@机器人名",
-  
+
   "polling": {
     "enabled": true,
     "interval": 500
   },
-  
+
   "asyncMode": true,
-  
+
   "plugins": {
     "openai": {
       "enabled": true,
       "apiKey": "sk-your-api-key-here",
+      "imageApiKey": "",
       "baseUrl": "https://api.openai.com/v1",
+      "imageBaseUrl": "",
+      "endpoint": "",
       "model": "gpt-3.5-turbo",
-      "requestTimeout": 90000,  // OpenAI API 请求超时时间 (毫秒)
-      "contextTimeout": 1200000, // 上下文超时时间 (毫秒)
+      "requestTimeout": 90000,
+      "contextTimeout": 1200000,
       "systemPrompt": "You are a helpful assistant.",
       "customHeaders": {
         "X-Custom-Header": "your-value"
-      }
+      },
+      "imageEnabled": false,
+      "imageKeywords": [
+        "画图",
+        "生图",
+        "生成图片",
+        "做海报"
+      ],
+      "imageBackend": "images",
+      "imageEndpoint": "",
+      "imageModel": "gpt-image-1",
+      "imageSize": "1024x1024",
+      "imageResponseFormat": "url",
+      "imagePromptModel": "gpt-3.5-turbo",
+      "imagePromptSystemPrompt": "你是一个文生图提示词优化器。你的任务是把用户的原始描述整理成适合图片生成模型使用的高质量 prompt。只输出最终 prompt，不要解释，不要加 markdown，不要加引号。尽量补足风格、构图、镜头、光影、材质、色彩、比例等关键信息，但不要偏离用户意图。"
     },
     "video": {
       "enabled": true,

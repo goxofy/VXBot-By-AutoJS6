@@ -49,6 +49,7 @@ function snapshotReplyTask(ctx, reply) {
         user: ctx.user || "",
         isPrivate: ctx.isPrivate === true,
         text: ctx.text || "",
+        rawText: ctx.rawText || ctx.text || "",
         reply: reply,
         timestamp: new Date().getTime()
     };
@@ -263,9 +264,10 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
 
         for (var mi = 0; mi < senderMsgs.length; mi++) {
             var msg = senderMsgs[mi];
-            var rawText = msg.text;
+            var rawText = msg.rawText || msg.text || "";
+            var mainText = msg.mainText || msg.text || "";
 
-            var cleanText = rawText;
+            var cleanText = mainText;
             if (this.mentionString) {
                 // [Fix] Robust Mention Stripping
                 function escapeRegExp(string) {
@@ -276,7 +278,6 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 cleanText = cleanText.replace(re, "").trim();
             }
 
-            // Skip empty messages after cleaning
             if (!cleanText || cleanText.length === 0) continue;
 
             console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + cleanText.substring(0, 50) + "...]");
@@ -285,6 +286,9 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 sessionName: normalizedTitle,
                 isPolling: true,
                 text: cleanText,
+                rawText: rawText,
+                mainText: cleanText,
+                quote: msg.quote || null,
                 sender: title,
                 user: senderName,
                 isPrivate: isPrivateChat,
@@ -441,49 +445,39 @@ Bot.prototype.processSendQueue = function () {
             var finalText = replyData.content || "";
 
             // [Feature] Add original message reference
-            // Format: 
+            // Format:
             //   - Quote + user message: Re: <user_msg>  / <quoted_content>  - <quoted_sender>
             //   - Quote only: Re: <quoted_content>  - <quoted_sender>
             //   - Normal message: Re: <content>
-            if (task.text && finalText) {
+            var sourceText = task.rawText || task.text;
+            if (sourceText && finalText) {
                 var userMessage = null;
                 var quotedContent = null;
                 var quotedSender = null;
 
-                // [Parse] Actual format from logs: "UserMessage Sender：QuotedContent"
-                // Example: "还有星期几？ Tink：今天是几月几号" 
-                //   -> user=还有星期几？, sender=Tink, quote=今天是几月几号
-
-                // Pattern: UserMessage + space + Sender + colon + QuotedContent
-                var fullMatch = task.text.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
+                var fullMatch = sourceText.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
                 if (fullMatch) {
-                    // Has both user message and quote
                     userMessage = fullMatch[1].trim();
                     quotedSender = fullMatch[2].trim();
                     quotedContent = fullMatch[3].trim();
                 } else {
-                    // Try simple quote pattern: "Sender：QuotedContent" (no user message)
-                    var simpleMatch = task.text.match(/^(.+?)[：:]\s*(.+)$/);
+                    var simpleMatch = sourceText.match(/^(.+?)[：:]\s*(.+)$/);
                     if (simpleMatch) {
                         quotedSender = simpleMatch[1].trim();
                         quotedContent = simpleMatch[2].trim();
                     }
                 }
 
-                // Build Re: prefix based on what we parsed
                 var rePrefix;
                 if (userMessage && quotedSender && quotedContent) {
-                    // User message + quote: "Re: UserMsg  / QuoteContent  - Sender"
                     var truncatedUser = userMessage.length > 20 ? userMessage.substring(0, 20) + "..." : userMessage;
                     var truncatedQuote = quotedContent.length > 15 ? quotedContent.substring(0, 15) + "..." : quotedContent;
                     rePrefix = "Re: " + truncatedUser + "  /  " + truncatedQuote + " - " + quotedSender;
                 } else if (quotedSender && quotedContent) {
-                    // Quote only: "Re: QuoteContent  - Sender"
                     var truncatedQuote = quotedContent.length > 30 ? quotedContent.substring(0, 30) + "..." : quotedContent;
                     rePrefix = "Re: " + truncatedQuote + " - " + quotedSender;
                 } else {
-                    // Normal message: "Re: Content"
-                    var truncatedMsg = task.text.length > 30 ? task.text.substring(0, 30) + "..." : task.text;
+                    var truncatedMsg = sourceText.length > 30 ? sourceText.substring(0, 30) + "..." : sourceText;
                     rePrefix = "Re: " + truncatedMsg;
                 }
 

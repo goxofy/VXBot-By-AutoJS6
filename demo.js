@@ -133,6 +133,9 @@ if (openaiConfig.enabled !== false) {
         imageModel: openaiConfig.imageModel || "",
         imageSize: openaiConfig.imageSize || "",
         imageResponseFormat: openaiConfig.imageResponseFormat || "",
+        imageEditEnabled: openaiConfig.imageEditEnabled === true,
+        imageEditEndpoint: openaiConfig.imageEditEndpoint || "",
+        imageEditModel: openaiConfig.imageEditModel || "",
         imagePromptModel: openaiConfig.imagePromptModel || "",
         imagePromptSystemPrompt: openaiConfig.imagePromptSystemPrompt || ""
     }));

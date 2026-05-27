@@ -1,11 +1,130 @@
 /**
  * WX模块
- * 
+ *
  * @author tmkook
  * @version 1.0.0
  * @description Support 8.0.38 版本
  * @since 2025-12-20
  */
+const SAVED_IMAGE_DIRS = [
+    "/sdcard/Pictures/WeiXin/",
+    "/sdcard/Pictures/Weixin/",
+    "/sdcard/Pictures/WeChat/",
+    "/sdcard/tencent/MicroMsg/WeiXin/",
+    "/sdcard/DCIM/Camera/"
+]
+
+function isTimestampText(text) {
+    if (!text) return false
+    return /^\s*\d{1,2}:\d{2}\s*$/.test(text) || /^((凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|深夜|半夜|昨天|今天|明天|周|星期).*?\d{1,2}:\d{2}|^\d{2,4}[年\.\/-]\d{1,2}[月\.\/-]\d{1,2})/.test(text)
+}
+
+function isChatScreen() {
+    return className("ImageButton").descContains("切换").exists()
+}
+
+function captureSavedImageState() {
+    let state = {}
+    for (let i = 0; i < SAVED_IMAGE_DIRS.length; i++) {
+        let dir = new java.io.File(SAVED_IMAGE_DIRS[i])
+        if (!dir.exists() || !dir.isDirectory()) continue
+        let files = dir.listFiles()
+        if (!files) continue
+        for (let j = 0; j < files.length; j++) {
+            let file = files[j]
+            if (!file || !file.isFile()) continue
+            let name = String(file.getName())
+            if (!/\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(name)) continue
+            let path = String(file.getAbsolutePath())
+            state[path] = String(file.lastModified()) + ":" + String(file.length())
+        }
+    }
+    return state
+}
+
+function findLatestSavedImagePath(beforeState, minModifiedTime) {
+    let newest = null
+    for (let i = 0; i < SAVED_IMAGE_DIRS.length; i++) {
+        let dir = new java.io.File(SAVED_IMAGE_DIRS[i])
+        if (!dir.exists() || !dir.isDirectory()) continue
+        let files = dir.listFiles()
+        if (!files) continue
+        for (let j = 0; j < files.length; j++) {
+            let file = files[j]
+            if (!file || !file.isFile()) continue
+            let name = String(file.getName())
+            if (!/\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(name)) continue
+            let path = String(file.getAbsolutePath())
+            let signature = String(file.lastModified()) + ":" + String(file.length())
+            if (beforeState[path] === signature) continue
+            let modified = Number(file.lastModified())
+            if (minModifiedTime && modified + 2000 < minModifiedTime) continue
+            if (!newest || modified > newest.modified) {
+                newest = {
+                    path: path,
+                    modified: modified
+                }
+            }
+        }
+    }
+    return newest ? newest.path : null
+}
+
+function extractQuoteMeta(quoteParts) {
+    let joinedQuote = (quoteParts || []).join(" ").trim()
+    let quoteSender = ""
+    let quoteText = ""
+    let matched = joinedQuote.match(/^(.+?)[：:]\s*(.*)$/)
+    let looksLikeSplitQuote = quoteParts && quoteParts.length >= 2 && quoteParts[0].length > 0 && quoteParts[0].length <= 20
+
+    if (matched) {
+        quoteSender = matched[1].trim()
+        quoteText = matched[2].trim()
+    } else if (looksLikeSplitQuote) {
+        quoteSender = quoteParts[0].trim()
+        quoteText = quoteParts.slice(1).join(" ").trim()
+    }
+
+    return {
+        sender: quoteSender,
+        text: quoteText,
+        raw: joinedQuote
+    }
+}
+
+function buildStructuredMessage(textParts, hasPhoto, captureImage) {
+    let rawText = (textParts || []).join(" ").trim()
+    let mainText = textParts && textParts.length > 0 ? String(textParts[0] || "").trim() : ""
+    let quoteParts = textParts && textParts.length > 1 ? textParts.slice(1) : []
+    let quoteMeta = extractQuoteMeta(quoteParts)
+    let quote = null
+    let hasQuoteContext = quoteParts.length > 0 || rawText !== mainText
+
+    if (hasPhoto && hasQuoteContext) {
+        quote = {
+            type: "image",
+            sender: quoteMeta.sender,
+            text: quoteMeta.text,
+            imagePath: null,
+            captureImage: captureImage || null
+        }
+    } else if (quoteMeta.sender || quoteMeta.text) {
+        quote = {
+            type: "text",
+            sender: quoteMeta.sender,
+            text: quoteMeta.text
+        }
+    }
+
+    return {
+        text: quote ? (mainText || rawText) : rawText,
+        rawText: rawText,
+        mainText: quote ? (mainText || rawText) : rawText,
+        quote: quote,
+        hasImage: hasPhoto
+    }
+}
+
 export default {
 
     /**
@@ -1090,128 +1209,96 @@ export default {
      * @returns {Array} List of message objects
      */
     getRecentMessages() {
-        // [Fix] Strict Container Search
-        // Prevent selecting RootView which merges Title + Message
-        let list = className("RecyclerView").findOne(2000);
+        let list = className("RecyclerView").findOne(2000)
         if (!list) {
-            list = className("ListView").findOne(1000);
+            list = className("ListView").findOne(1000)
         }
 
-        // If no list found, we cannot reliably read messages.
-        if (!list) return [];
+        if (!list) return []
 
-        let allItems = list.children();
-        let messages = [];
+        let allItems = list.children()
+        let messages = []
 
         if (allItems && allItems.size() > 0) {
-            // 从下往上找
             for (let i = allItems.size() - 1; i >= 0; i--) {
-                let item = allItems.get(i);
+                let item = allItems.get(i)
+                if (!item) continue
 
-                // Skip invalid items (e.g. date separators often are small/different)
-                if (!item) continue;
-
-                // 找头像
-                let head = item.findOne(className("ImageView").descContains("头像"));
+                let head = item.findOne(className("ImageView").descContains("头像"))
                 if (!head) {
-                    // [Fix] Time Separator Check
-                    // If we encounter an item without avatar, it might be a Timestamp.
-                    // If it IS a timestamp, it indicates a time gap, so we should stop scanning older history.
-                    let textViews = item.find(className("TextView"));
+                    let textViews = item.find(className("TextView"))
                     if (textViews.size() > 0) {
-                        let t = textViews.get(0).text();
-                        // Reuse valid timestamp regex
-                        if (/^\s*\d{1,2}:\d{2}\s*$/.test(t) || /^((凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|深夜|半夜|昨天|今天|明天|周|星期).*?\d{1,2}:\d{2}|^\d{2,4}[年\.\/-]\d{1,2}[月\.\/-]\d{1,2})/.test(t)) {
-                            console.log(">> Reached Timestamp Separator [" + t + "], stopping scan.");
-                            break;
+                        let t = textViews.get(0).text()
+                        if (isTimestampText(t)) {
+                            console.log(">> Reached Timestamp Separator [" + t + "], stopping scan.")
+                            break
                         }
                     }
-                    continue;
+                    continue
                 }
 
-                // [Fix] Robustness: If avatar description is incomplete (just "头像"), 
-                // it means the nickname hasn't loaded. Skip to avoid "Phantom Context" or failure to filter nickname from text.
                 if (head.desc() === "头像") {
-                    console.log("Skipping message with incomplete avatar desc");
-                    continue;
+                    console.log("Skipping message with incomplete avatar desc")
+                    continue
                 }
 
-                // 判断头像位置
-                let headRect = head.bounds();
-                let isSelf = headRect.left > device.width / 2;
-
+                let headRect = head.bounds()
+                let isSelf = headRect.left > device.width / 2
                 if (isSelf) {
-                    // 遇到自己发的消息，停止扫描 (认为之前的都已处理或不相关)
-                    break;
+                    break
                 }
 
-                // 是朋友的消息，提取内容
-                let tv = null;
-                let tvs = item.find(className("TextView"));
-
-                let startIndex = 0;
+                let senderName = head.desc().replace("头像", "")
+                let tvs = item.find(className("TextView"))
+                let startIndex = 0
                 if (tvs.size() > 1) {
-                    let firstText = tvs.get(0).text();
-                    let headDesc = head.desc();
-                    if (headDesc.indexOf(firstText) > -1 || firstText.length < headDesc.length) {
-                        startIndex = 1;
+                    let firstText = tvs.get(0).text()
+                    let headDesc = head.desc()
+                    if (firstText && headDesc.indexOf(firstText) > -1) {
+                        startIndex = 1
                     }
                 }
 
-                // Collect all valid text parts
-                let textParts = [];
-
+                let textParts = []
                 for (let j = startIndex; j < tvs.size(); j++) {
-                    let t = tvs.get(j);
-                    let txt = t.text().trim();
+                    let t = tvs.get(j)
+                    let txt = t.text().trim()
 
-                    // Filter empty or too small views
-                    if (t.bounds().height() <= 20 || txt.length === 0) continue;
-
-                    // [Fix] Filter Timestamp
-                    // 1. Strict Pure Time: "12:00", " 12:00 ", "12:00"
-                    if (/^\s*\d{1,2}:\d{2}\s*$/.test(txt)) continue;
-
-                    if (/^((凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|深夜|半夜|昨天|今天|明天|周|星期).*?\d{1,2}:\d{2}|^\d{2,4}[年\.\/-]\d{1,2}[月\.\/-]\d{1,2})/.test(txt)) {
-                        continue;
-                    }
-
-                    // [Fix] Filter Sender Name (Aggressive)
-                    // If the text is exactly the sender's name (minus "头像" suffix), ignore it.
-                    let senderName = head.desc().replace("头像", "");
-                    if (txt === senderName || senderName.indexOf(txt) > -1) {
-                        continue;
-                    }
-
-                    // [Fix] Filter Group Title Pattern
-                    // Group titles often appear as "GroupName(N)" where N is member count
-                    // This should NOT be part of a message bubble, but filter just in case
+                    if (t.bounds().height() <= 20 || txt.length === 0) continue
+                    if (isTimestampText(txt)) continue
+                    if (txt === senderName || senderName.indexOf(txt) > -1) continue
                     if (/^.+\(\d+\)$/.test(txt) && txt.length < 20) {
-                        console.log(">> Filtered Group Title Pattern: [" + txt + "]");
-                        continue;
+                        console.log(">> Filtered Group Title Pattern: [" + txt + "]")
+                        continue
                     }
 
-
-                    textParts.push(txt);
+                    textParts.push(txt)
                 }
 
-                if (textParts.length > 0) {
-                    let senderName = head.desc();
-                    if (senderName.indexOf("头像") > -1) {
-                        senderName = senderName.replace("头像", "");
-                    }
+                let messageObject = new MessageObject(item)
+                let hasPhoto = messageObject.isPhoto()
+                if (textParts.length === 0 && !hasPhoto) continue
 
-                    // 插入到数组开头 (保持时间顺序: 旧 -> 新)
-                    messages.unshift({
-                        text: textParts.join(" "), // Join parts with space
-                        sender: senderName,
-                        rect: item.bounds(),
-                        headRect: head.bounds()
-                    });
-                }
+                let cachedQuoteImagePath = null
+                let structured = buildStructuredMessage(textParts, hasPhoto, function () {
+                    if (cachedQuoteImagePath !== null) return cachedQuoteImagePath
+                    cachedQuoteImagePath = messageObject.savePhotoAndGetPath()
+                    return cachedQuoteImagePath
+                })
+
+                messages.unshift({
+                    text: structured.text,
+                    rawText: structured.rawText,
+                    mainText: structured.mainText,
+                    quote: structured.quote,
+                    hasImage: structured.hasImage,
+                    sender: senderName,
+                    rect: item.bounds(),
+                    headRect: head.bounds()
+                })
             }
         }
-        return messages;
+        return messages
     },
 
     getLatestMessage() {
@@ -1248,10 +1335,7 @@ export default {
                 if (tvs.size() > 1) {
                     let firstText = tvs.get(0).text();
                     let headDesc = head.desc(); // e.g. "Tink头像"
-                    // Simple fuzzy check: if header desc includes the text of the first view, likely it is the nickname
-                    if (headDesc.indexOf(firstText) > -1 || firstText.length < headDesc.length) {
-                        // Heuristic: If we have multiple texts, and the first one is short/similar to avatar, skip it.
-                        // But usually nickname is small.
+                    if (firstText && headDesc.indexOf(firstText) > -1) {
                         startIndex = 1;
                     }
                 }
@@ -1580,37 +1664,179 @@ const MessageObject = function (UIObject) {
         return false; // Fallback
     }
 
+    this.getImageNodes = function () {
+        let nodes = []
+        if (!this.UIObject) return nodes
+
+        let directPhoto = this.UIObject.find(descContains("图片"))
+        if (directPhoto && directPhoto.nonEmpty()) {
+            directPhoto.forEach(item => nodes.push(item))
+        }
+
+        let imageViews = this.UIObject.find(className("ImageView"))
+        if (imageViews && imageViews.nonEmpty()) {
+            imageViews.forEach(item => {
+                if (!item) return
+                let desc = item.desc() || ""
+                let rect = item.bounds()
+                if (desc.indexOf("头像") > -1) return
+                if (rect.width() < 36 || rect.height() < 36) return
+                if (rect.centerX() <= 0 || rect.centerY() <= 0) return
+                if (nodes.indexOf(item) === -1) {
+                    nodes.push(item)
+                }
+            })
+        }
+
+        return nodes
+    }
+
     /**
      * 是否是图片
-     * 
+     *
      * @returns boolean
      */
     this.isPhoto = function () {
-        if (this.UIObject) {
-            let photo = this.UIObject.find(descContains("图片"))
-            return photo.nonEmpty()
+        return this.getPhotoNode() != null
+    }
+
+    this.getPhotoNode = function () {
+        let nodes = this.getImageNodes()
+        if (nodes.length === 0) return null
+
+        let selected = null
+        let selectedArea = 0
+        for (let i = 0; i < nodes.length; i++) {
+            let node = nodes[i]
+            let rect = node.bounds()
+            let area = rect.width() * rect.height()
+            if (!selected || area > selectedArea) {
+                selected = node
+                selectedArea = area
+            }
         }
-        return false;
+
+        return selected
+    }
+
+    this.savePhotoAndGetPath = function () {
+        let photo = this.getPhotoNode()
+        if (!photo) return null
+
+        function tapNode(node) {
+            if (!node) return false
+            try {
+                if (node.click && node.click()) return true
+            } catch (e) {
+            }
+            try {
+                let rect = node.bounds()
+                click(rect.centerX(), rect.centerY())
+                return true
+            } catch (e) {
+            }
+            return false
+        }
+
+        function findSaveAction() {
+            return text("保存图片").findOnce()
+                || textContains("保存图片").findOne(800)
+                || text("保存").findOnce()
+                || textContains("保存").findOne(800)
+                || descContains("保存").findOne(800)
+                || className("FrameLayout").depth(20).drawingOrder(4).findOnce()
+        }
+
+        function findFullscreenImageRect() {
+            let imageViews = className("ImageView").find()
+            let selected = null
+            let selectedArea = 0
+            for (let i = 0; i < imageViews.size(); i++) {
+                let item = imageViews.get(i)
+                if (!item) continue
+                let desc = item.desc() || ""
+                if (desc.indexOf("头像") > -1) continue
+                let rect = item.bounds()
+                let area = rect.width() * rect.height()
+                if (rect.width() < device.width * 0.35 || rect.height() < device.height * 0.2) continue
+                if (area > selectedArea) {
+                    selected = rect
+                    selectedArea = area
+                }
+            }
+            return selected
+        }
+
+        function longPressPoint(x, y) {
+            console.log("[vchat] Long press image at: " + x + "," + y)
+            try {
+                if (typeof press === "function") {
+                    return !!press(x, y, 1800)
+                }
+                longClick(x, y)
+                return true
+            } catch (e) {
+                console.warn("[vchat] Long press failed: " + e)
+                return false
+            }
+        }
+
+        let beforeState = captureSavedImageState()
+        let startedAt = new Date().getTime()
+        let opened = false
+
+        try {
+            let target = photo.parent() || photo
+            let thumbRect = target.bounds ? target.bounds() : photo.bounds()
+            click(thumbRect.centerX(), thumbRect.centerY())
+            opened = true
+            sleep(1500)
+
+            let fullscreenRect = findFullscreenImageRect()
+            if (fullscreenRect) {
+                longPressPoint(fullscreenRect.centerX(), fullscreenRect.centerY())
+            } else {
+                longPressPoint(parseInt(device.width / 2), parseInt(device.height / 2))
+            }
+            sleep(1600)
+
+            let save = findSaveAction()
+            if (!save) {
+                console.warn("[vchat] Save image action not found")
+                return null
+            }
+
+            tapNode(save.parent && save.parent() ? save.parent() : save)
+
+            for (let i = 0; i < 12; i++) {
+                sleep(500)
+                let savedPath = findLatestSavedImagePath(beforeState, startedAt)
+                if (savedPath) {
+                    return savedPath
+                }
+            }
+        } catch (e) {
+            console.error("[vchat] Save photo failed: " + e)
+        } finally {
+            if (opened) {
+                for (let i = 0; i < 3; i++) {
+                    if (isChatScreen()) break
+                    back()
+                    sleep(500)
+                }
+            }
+        }
+
+        return null
     }
 
     /**
      * 保存图片
-     * 
+     *
      * @returns boolean
      */
     this.savePhoto = function () {
-        let photo = this.UIObject.findOnce(descContains("图片"))
-        if (photo) {
-            photo.parent().click()
-            sleep(random(500, 1000))
-            let save = className("FrameLayout").depth(20).drawingOrder(4).findOnce()
-            if (save) {
-                save.click()
-                back()
-                return true
-            }
-        }
-        return false
+        return !!this.savePhotoAndGetPath()
     }
 
     /**

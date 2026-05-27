@@ -83,6 +83,9 @@ function OpenAIBot(config) {
     this.config.imageModel = this.config.imageModel || this.config.model;
     this.config.imageSize = this.config.imageSize || "";
     this.config.imageResponseFormat = this.config.imageResponseFormat || "";
+    this.config.imageEditEnabled = this.config.imageEditEnabled === true;
+    this.config.imageEditEndpoint = this.config.imageEditEndpoint || (imageBackend === "chat" ? this.config.imageEndpoint : imageBase + "/images/edits");
+    this.config.imageEditModel = this.config.imageEditModel || this.config.imageModel;
     this.config.imagePromptModel = this.config.imagePromptModel || this.config.model;
     this.config.imagePromptSystemPrompt = this.config.imagePromptSystemPrompt || "你是一个文生图提示词优化器。你的任务是把用户的原始描述整理成适合图片生成模型使用的高质量 prompt。只输出最终 prompt，不要解释，不要加 markdown，不要加引号。尽量补足风格、构图、镜头、光影、材质、色彩、比例等关键信息，但不要偏离用户意图。";
 
@@ -98,9 +101,12 @@ OpenAIBot.prototype.buildHeaders = function (options) {
     }
 
     var headers = {
-        "Authorization": "Bearer " + apiKey,
-        "Content-Type": "application/json"
+        "Authorization": "Bearer " + apiKey
     };
+
+    if (options.jsonContentType !== false) {
+        headers["Content-Type"] = "application/json";
+    }
 
     if (options.includeCustomHeaders === false) {
         return headers;
@@ -129,13 +135,13 @@ OpenAIBot.prototype.callChatCompletion = function (messages, model) {
     });
 
     var body = res.body.json();
-    if (body && body.choices && body.choices.length > 0 && body.choices[0].message) {
-        var reply = body.choices[0].message.content;
+    var reply = this.extractReplyTextFromBody(body);
+    if (reply) {
         console.log("[OpenAI] Received reply");
         return reply;
     }
 
-    console.error("OpenAI Invalid Response: " + JSON.stringify(body));
+    console.error("[OpenAI] Empty chat reply: " + JSON.stringify(body));
     return null;
 };
 
@@ -203,6 +209,32 @@ OpenAIBot.prototype.extractChatContentFromChoice = function (choice) {
 OpenAIBot.prototype.extractChatContentFromBody = function (body) {
     if (!body || !body.choices || body.choices.length === 0) return "";
     return this.extractChatContentFromChoice(body.choices[0]);
+};
+
+OpenAIBot.prototype.extractReplyTextFromBody = function (body) {
+    if (!body || !body.choices || body.choices.length === 0) return "";
+
+    var choice = body.choices[0] || {};
+    var content = this.extractChatContentFromChoice(choice);
+    if (content && String(content).trim()) {
+        return String(content).trim();
+    }
+
+    var message = choice.message || {};
+    if (message.refusal && String(message.refusal).trim()) {
+        return String(message.refusal).trim();
+    }
+    if (message.reasoning_content && String(message.reasoning_content).trim()) {
+        return String(message.reasoning_content).trim();
+    }
+    if (body.error && body.error.message) {
+        return String(body.error.message).trim();
+    }
+    if (choice.finish_reason === "content_filter") {
+        return "这个请求触发了内容限制，请换个说法试试。";
+    }
+
+    return "";
 };
 
 OpenAIBot.prototype.extractChatContentFromSse = function (text) {
@@ -349,6 +381,19 @@ OpenAIBot.prototype.rewriteImagePrompt = function (text) {
     return sourcePrompt;
 };
 
+OpenAIBot.prototype.getImageInstructionText = function (text) {
+    var sourcePrompt = this.extractImagePromptText(text);
+    if (!sourcePrompt) return "";
+
+    var matchedKeyword = this.getMatchedImageKeyword(text || "");
+    var normalizedPrompt = sourcePrompt.replace(/^[\s:：,，;；!！?？-]+/, "").replace(/[\s:：,，;；!！?？-]+$/, "").trim();
+    if (matchedKeyword && normalizedPrompt === matchedKeyword) {
+        return "";
+    }
+
+    return sourcePrompt;
+};
+
 OpenAIBot.prototype.saveGeneratedImageBytes = function (bytes, ext) {
     if (!bytes) return null;
 
@@ -383,6 +428,127 @@ OpenAIBot.prototype.getMimeExtension = function (mimeType) {
     if (normalized === "image/webp") return "webp";
     if (normalized === "image/gif") return "gif";
     return "png";
+};
+
+OpenAIBot.prototype.getPathMimeType = function (path) {
+    var ext = this.getUrlExtension(path || "");
+    if (ext === "jpg") return "image/jpeg";
+    if (ext === "png") return "image/png";
+    if (ext === "webp") return "image/webp";
+    if (ext === "gif") return "image/gif";
+    return "image/png";
+};
+
+OpenAIBot.prototype.safeClose = function (closeable) {
+    if (!closeable || !closeable.close) return;
+    try {
+        closeable.close();
+    } catch (e) {
+    }
+};
+
+OpenAIBot.prototype.readFileBytes = function (path) {
+    if (!path) return null;
+
+    var input = null;
+    var output = null;
+    try {
+        input = new java.io.BufferedInputStream(new java.io.FileInputStream(new java.io.File(path)));
+        output = new java.io.ByteArrayOutputStream();
+        var buffer = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 8192);
+        var bytesRead = 0;
+        while ((bytesRead = input.read(buffer)) !== -1) {
+            if (bytesRead > 0) {
+                output.write(buffer, 0, bytesRead);
+            }
+        }
+        return output.toByteArray();
+    } catch (e) {
+        console.error("[OpenAI] Read image file failed: " + e);
+        return null;
+    } finally {
+        this.safeClose(output);
+        this.safeClose(input);
+    }
+};
+
+OpenAIBot.prototype.encodeImageFileAsDataUrl = function (path) {
+    var bytes = this.readFileBytes(path);
+    if (!bytes) return null;
+
+    try {
+        var mimeType = this.getPathMimeType(path);
+        var base64 = android.util.Base64.encodeToString(bytes, 2);
+        return "data:" + mimeType + ";base64," + base64.trim();
+    } catch (e) {
+        console.error("[OpenAI] Encode image file failed: " + e);
+        return null;
+    }
+};
+
+OpenAIBot.prototype.normalizeIncomingMessage = function (ctx) {
+    var text = (ctx.text || "").trim();
+    var rawText = (ctx.rawText || text || "").trim();
+    var quote = ctx.quote || null;
+
+    if (!quote) {
+        var fullQuoteMatch = rawText.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
+        if (fullQuoteMatch) {
+            text = fullQuoteMatch[1].trim();
+            quote = {
+                type: "text",
+                sender: fullQuoteMatch[2].trim(),
+                text: fullQuoteMatch[3].trim()
+            };
+        } else {
+            var simpleQuoteMatch = rawText.match(/^(.+?)[：:]\s*(.+)$/);
+            if (simpleQuoteMatch) {
+                text = simpleQuoteMatch[2].trim();
+                quote = {
+                    type: "text",
+                    sender: simpleQuoteMatch[1].trim(),
+                    text: simpleQuoteMatch[2].trim()
+                };
+            }
+        }
+    }
+
+    return {
+        text: text || rawText,
+        rawText: rawText,
+        quote: quote
+    };
+};
+
+OpenAIBot.prototype.buildModelInputText = function (input) {
+    if (!input) return "";
+
+    var text = input.text || "";
+    var quote = input.quote;
+    if (quote && quote.type === "text" && quote.text) {
+        if (text && text !== quote.text) {
+            var suffix = quote.sender ? (" - " + quote.sender) : "";
+            return text + " (引用: " + quote.text + suffix + ")";
+        }
+        return quote.text;
+    }
+
+    return text || input.rawText || "";
+};
+
+OpenAIBot.prototype.resolveQuotedImagePath = function (quote) {
+    if (!quote || quote.type !== "image") return null;
+    if (quote.imagePath) return quote.imagePath;
+
+    if (quote.captureImage) {
+        try {
+            quote.imagePath = quote.captureImage();
+        } catch (e) {
+            console.error("[OpenAI] Capture quoted image failed: " + e);
+        }
+    }
+
+    return quote.imagePath || null;
 };
 
 OpenAIBot.prototype.decodeDataUrlImage = function (dataUrl) {
@@ -523,7 +689,130 @@ OpenAIBot.prototype.callImageChatBackend = function (prompt) {
     return null;
 };
 
-OpenAIBot.prototype.callImageAPI = function (prompt) {
+OpenAIBot.prototype.callImagesEditAPI = function (prompt, imagePath) {
+    console.log("[OpenAI] Calling image edit API (images backend)...");
+
+    try {
+        importClass(okhttp3.OkHttpClient);
+        importClass(okhttp3.Request);
+        importClass(okhttp3.RequestBody);
+        importClass(okhttp3.MediaType);
+        importClass(okhttp3.MultipartBody);
+        importClass(java.util.concurrent.TimeUnit);
+
+        var imageFile = new java.io.File(imagePath);
+        if (!imageFile.exists()) {
+            console.error("[OpenAI] Edit source image not found: " + imagePath);
+            return null;
+        }
+
+        var client = new OkHttpClient.Builder()
+            .connectTimeout(this.config.requestTimeout, TimeUnit.MILLISECONDS)
+            .readTimeout(this.config.requestTimeout, TimeUnit.MILLISECONDS)
+            .writeTimeout(this.config.requestTimeout, TimeUnit.MILLISECONDS)
+            .build();
+
+        var multipart = new MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("model", this.config.imageEditModel)
+            .addFormDataPart("prompt", prompt)
+            .addFormDataPart("image", String(imageFile.getName()), RequestBody.create(MediaType.parse(this.getPathMimeType(imagePath)), imageFile));
+
+        if (this.config.imageSize) {
+            multipart.addFormDataPart("size", this.config.imageSize);
+        }
+        if (this.config.imageResponseFormat) {
+            multipart.addFormDataPart("response_format", this.config.imageResponseFormat);
+        }
+
+        var requestBuilder = new Request.Builder().url(this.config.imageEditEndpoint);
+        var headers = this.buildHeaders({
+            apiKey: this.config.imageApiKey,
+            includeCustomHeaders: false,
+            jsonContentType: false
+        });
+        for (var key in headers) {
+            if (headers.hasOwnProperty(key)) {
+                requestBuilder.addHeader(key, headers[key]);
+            }
+        }
+
+        var response = client.newCall(requestBuilder.post(multipart.build()).build()).execute();
+        var code = response.code();
+        var rawBody = "";
+        try {
+            rawBody = response.body() ? response.body().string() : "";
+        } finally {
+            response.close();
+        }
+
+        if (code < 200 || code >= 300) {
+            console.error("[OpenAI] Image edit request failed: " + code + " " + rawBody.substring(0, 200));
+            return null;
+        }
+
+        var localPath = this.extractImagePathFromRawResponse(rawBody);
+        if (localPath) return localPath;
+
+        console.error("[OpenAI] Invalid image edit response: " + rawBody.substring(0, 200));
+        return null;
+    } catch (e) {
+        console.error("[OpenAI] Image edit request error: " + e);
+        return null;
+    }
+};
+
+OpenAIBot.prototype.callImageChatEditBackend = function (prompt, imagePath) {
+    console.log("[OpenAI] Calling image edit API (chat backend)...");
+
+    var dataUrl = this.encodeImageFileAsDataUrl(imagePath);
+    if (!dataUrl) return null;
+
+    var res = http.postJson(this.config.imageEditEndpoint, {
+        model: this.config.imageEditModel,
+        messages: [{
+            role: "user",
+            content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: dataUrl } }
+            ]
+        }],
+        stream: false
+    }, {
+        timeout: this.config.requestTimeout,
+        headers: this.buildHeaders({
+            apiKey: this.config.imageApiKey,
+            includeCustomHeaders: false
+        })
+    });
+    var rawBody = this.readResponseBody(res);
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+        console.error("[OpenAI] Image edit chat request failed: " + res.statusCode + " " + rawBody.substring(0, 200));
+        return null;
+    }
+
+    var localPath = this.extractImagePathFromRawResponse(rawBody);
+    if (localPath) return localPath;
+
+    console.error("[OpenAI] Invalid image edit chat response: " + rawBody.substring(0, 200));
+    return null;
+};
+
+OpenAIBot.prototype.callImageEditAPI = function (prompt, imagePath) {
+    if (!this.config.imageEditEndpoint || !imagePath) return null;
+
+    if (this.config.imageBackend === "chat") {
+        return this.callImageChatEditBackend(prompt, imagePath);
+    }
+
+    return this.callImagesEditAPI(prompt, imagePath);
+};
+
+OpenAIBot.prototype.callImageAPI = function (prompt, imagePath) {
+    if (imagePath) {
+        return this.callImageEditAPI(prompt, imagePath);
+    }
+
     if (!this.config.imageEndpoint) return null;
 
     if (this.config.imageBackend === "chat") {
@@ -611,28 +900,18 @@ OpenAIBot.prototype.handle = function (ctx) {
         }
     } catch (e) {
         console.error("OpenAI API Error: " + e);
-        userContext.history.pop();
     }
 
+    userContext.history.pop();
     return false;
 };
 
 OpenAIBot.prototype.handleAsync = function (ctx, callback) {
-    var text = ctx.text;
+    var input = this.normalizeIncomingMessage(ctx);
+    var text = input.text || "";
+    var modelInputText = this.buildModelInputText(input);
 
-    var fullQuoteMatch = text.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
-    if (fullQuoteMatch) {
-        var userMsg = fullQuoteMatch[1].trim();
-        var quotedContent = fullQuoteMatch[3].trim();
-        text = userMsg + " (引用: " + quotedContent + ")";
-    } else {
-        var simpleQuoteMatch = text.match(/^(.+?)[：:]\s*(.+)$/);
-        if (simpleQuoteMatch) {
-            text = simpleQuoteMatch[2].trim();
-        }
-    }
-
-    console.log("[OpenAI] Cleaned text: " + text.substring(0, 30));
+    console.log("[OpenAI] Cleaned text: " + modelInputText.substring(0, 30));
 
     var sessionName = getSessionName(ctx);
 
@@ -670,41 +949,67 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     }
 
     var PROCESS_WINDOW = 5 * 1000;
-    if (text === userContext.lastInput &&
+    if (modelInputText === userContext.lastInput &&
         (now - userContext.lastProcessTime) < PROCESS_WINDOW) {
         console.log("[OpenAI] Dedupe: Same message being processed within 5s");
         return false;
     }
 
     var DEDUPE_TTL = 120 * 1000;
-    if (text === userContext.lastInput &&
-        text === userContext.lastRepliedInput &&
+    if (modelInputText === userContext.lastInput &&
+        modelInputText === userContext.lastRepliedInput &&
         (now - userContext.lastRepliedTime) < DEDUPE_TTL) {
-        console.log("[OpenAI] Dedupe: Already replied to '" + text.substring(0, 20) + "...' within TTL");
+        console.log("[OpenAI] Dedupe: Already replied to '" + modelInputText.substring(0, 20) + "...' within TTL");
         return false;
     }
 
     userContext.lastActive = now;
-    userContext.lastInput = text;
+    userContext.lastInput = modelInputText;
     userContext.lastProcessTime = now;
 
     var self = this;
-    var inputText = text;
-    var isImageRequest = this.isImageRequest(text);
+    var inputText = modelInputText;
+    var requestText = text || modelInputText;
+    var isImageRequest = this.isImageRequest(requestText);
 
     if (isImageRequest) {
         console.log("[OpenAI] Detected image request");
-        this.sendImageFeedback(ctx);
 
+        var sourceImagePath = null;
+        var useImageEdit = false;
+        if (input.quote && input.quote.type === "image") {
+            var instructionText = this.getImageInstructionText(requestText);
+            if (!instructionText) {
+                if (callback) callback(ctx, { type: "text", content: "请在引用图片时补充修改要求" });
+                return true;
+            }
+
+            if (this.config.imageEditEnabled) {
+                sourceImagePath = this.resolveQuotedImagePath(input.quote);
+                if (!sourceImagePath) {
+                    if (callback) callback(ctx, { type: "text", content: "读取引用图片失败，请重试" });
+                    return true;
+                }
+                useImageEdit = true;
+            } else {
+                console.log("[OpenAI] Quoted image detected but image edit disabled, fallback to text-to-image");
+            }
+        }
+
+        this.sendImageFeedback(ctx);
         threads.start(function () {
             try {
-                var rewrittenPrompt = self.rewriteImagePrompt(inputText);
+                var rewrittenPrompt = self.rewriteImagePrompt(requestText);
                 if (!rewrittenPrompt) {
-                    rewrittenPrompt = self.extractImagePromptText(inputText);
+                    rewrittenPrompt = self.getImageInstructionText(requestText);
+                }
+                if (!rewrittenPrompt) {
+                    if (callback) callback(ctx, { type: "text", content: "请补充图片描述" });
+                    return;
                 }
 
                 console.log("[OpenAI] Image prompt: " + rewrittenPrompt.substring(0, 80));
-                var localPath = self.callImageAPI(rewrittenPrompt);
+                var localPath = useImageEdit ? self.callImageEditAPI(rewrittenPrompt, sourceImagePath) : self.callImageAPI(rewrittenPrompt);
                 if (localPath) {
                     userContext.lastRepliedInput = inputText;
                     userContext.lastRepliedTime = new Date().getTime();
@@ -725,9 +1030,9 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         return true;
     }
 
-    userContext.history.push({ role: "user", content: text });
+    userContext.history.push({ role: "user", content: modelInputText });
 
-    console.log("[OpenAI] Starting API thread for: " + text.substring(0, 20) + "...");
+    console.log("[OpenAI] Starting API thread for: " + modelInputText.substring(0, 20) + "...");
     threads.start(function () {
         try {
             var reply = self.callOpenAI(userContext.history);
@@ -736,11 +1041,13 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
                 userContext.lastRepliedInput = inputText;
                 userContext.lastRepliedTime = new Date().getTime();
                 if (callback) callback(ctx, reply);
+                return;
             }
         } catch (e) {
             console.error("Async OpenAI Error: " + e);
-            userContext.history.pop();
         }
+
+        userContext.history.pop();
     });
 
     return true;

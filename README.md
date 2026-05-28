@@ -163,7 +163,7 @@ npm run demo
 | `imageKeywords` | `string[]` | 生图触发关键词数组。 | 例如 `['画图','生图','改图','图改图']`；命中任一关键词即进入图片请求分支。 |
 | `imageApiKey` | `string` | 图片后端使用的 API Key。 | 留空时默认回退到 `apiKey`。 |
 | `imageBaseUrl` | `string` | 图片后端根地址。 | 留空时默认回退到 `baseUrl`。 |
-| `imageBackend` | `string` | 图片后端协议类型。 | `"images"` 或 `"chat"`；默认 `"images"`。 |
+| `imageBackend` | `string` | 图片后端协议类型。 | `"images"` 或 `"chat"`；默认 `"images"`。其中 `"chat"` 暂时只兼容本项目当前已适配的 [flow2api](https://github.com/TheSmallHanCat/flow2api) 这类调用格式。 |
 | `imageEndpoint` | `string` | 图片生成接口完整地址。 | 留空时自动推导：`images` 模式下为 `imageBaseUrl + "/images/generations"`，`chat` 模式下为 `imageBaseUrl + "/chat/completions"`。 |
 | `imageModel` | `string` | 图片生成模型名。 | 任意后端支持的模型 ID，例如 `gpt-image-1`。 |
 | `imageSize` | `string` | 生成图片尺寸。 | 常见值：`1024x1024`、`1024x1536`、`1536x1024`、`2048x2048`；是否支持取决于后端。 |
@@ -179,7 +179,9 @@ npm run demo
 | 场景 | 推荐填写 |
 | :--- | :--- |
 | 后端支持标准 OpenAI `POST /images/generations` 和 `POST /images/edits` | `imageBackend: "images"` |
-| 后端把生图 / 改图都做成 `POST /chat/completions` 的多模态或特殊 chat 返回 | `imageBackend: "chat"` |
+| 后端把生图 / 改图都做成 `POST /chat/completions`，并且返回格式与 [flow2api](https://github.com/TheSmallHanCat/flow2api) 兼容 | `imageBackend: "chat"` |
+
+> 注意：`imageBackend: "chat"` 目前不是泛化兼容所有 chat 型生图后端，而是仅保证兼容本项目当前已经适配过的 `flow2api` 风格输入 / 输出格式。
 
 ### `plugins.video` 配置
 

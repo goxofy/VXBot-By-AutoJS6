@@ -99,8 +99,9 @@ function buildStructuredMessage(textParts, hasPhoto, captureImage) {
     let quoteMeta = extractQuoteMeta(quoteParts)
     let quote = null
     let hasQuoteContext = quoteParts.length > 0 || rawText !== mainText
+    let effectiveHasImage = !!hasPhoto && (textParts.length === 0 || hasQuoteContext)
 
-    if (hasPhoto && hasQuoteContext) {
+    if (effectiveHasImage && hasQuoteContext) {
         quote = {
             type: "image",
             sender: quoteMeta.sender,
@@ -121,7 +122,9 @@ function buildStructuredMessage(textParts, hasPhoto, captureImage) {
         rawText: rawText,
         mainText: quote ? (mainText || rawText) : rawText,
         quote: quote,
-        hasImage: hasPhoto
+        hasImage: effectiveHasImage,
+        imageKind: effectiveHasImage ? (quote && quote.type === "image" ? "quote" : "direct") : null,
+        captureImage: effectiveHasImage ? (captureImage || null) : null
     }
 }
 
@@ -805,6 +808,8 @@ export default {
             input.click();
             sleep(200);
 
+            let mentionInserted = false;
+
             // 1. Trigger Mention List (JUST "@")
             // User feedback: Inputting full "@Name" fails to trigger list. Must be just "@".
             input.setText("@");
@@ -841,46 +846,53 @@ export default {
 
                     // CRITICAL: Wait for WeChat to convert "@Tink" text into "[BlueBlock]"
                     sleep(1000);
+                    mentionInserted = true;
                 }
             } else {
                 console.log("Mention list match failed for: " + who);
-                // Fallback: Use search bar in the popup?
-                // The screenshot shows a search bar with text "搜索"
                 let searchBar = text("搜索").findOne(1000);
                 if (searchBar) {
                     let sb = searchBar.bounds();
                     click(sb.centerX(), sb.centerY());
                     sleep(500);
-                    // Now we are in search mode, type the name
                     setText(who);
                     sleep(1000);
-                    // Try finding again
                     let searchMatch = text(who).visibleToUser(true).findOne(2000);
+                    if (!searchMatch) {
+                        searchMatch = textContains(who).visibleToUser(true).findOne(1000);
+                    }
                     if (searchMatch) {
                         let smr = searchMatch.bounds();
                         click(smr.centerX(), smr.centerY());
                         sleep(1000);
+                        mentionInserted = true;
                     }
                 }
             }
 
-            // 3. Append Content via Paste
-            // [Fix] Add a leading space manually. 
-            setClip(" " + content);
-            sleep(200);
+            if (!mentionInserted) {
+                console.log("Fallback to plain group text send for: " + who);
+                input.setText(content);
+                sleep(500);
+            } else {
+                // 3. Append Content via Paste
+                // [Fix] Add a leading space manually.
+                setClip(" " + content);
+                sleep(200);
 
-            // Re-focus input if needed
-            input.click();
-            sleep(200);
+                // Re-focus input if needed
+                input.click();
+                sleep(200);
 
-            if (!input.paste()) {
-                let r = input.bounds();
-                longClick(r.centerX(), r.centerY());
-                sleep(800);
-                let pasteBtn = text("粘贴").findOnce();
-                if (pasteBtn) pasteBtn.click();
+                if (!input.paste()) {
+                    let r = input.bounds();
+                    longClick(r.centerX(), r.centerY());
+                    sleep(800);
+                    let pasteBtn = text("粘贴").findOnce();
+                    if (pasteBtn) pasteBtn.click();
+                }
+                sleep(500);
             }
-            sleep(500);
 
             // 4. Send
             let btn = className("Button").text("发送").findOnce();
@@ -1292,6 +1304,8 @@ export default {
                     mainText: structured.mainText,
                     quote: structured.quote,
                     hasImage: structured.hasImage,
+                    imageKind: structured.imageKind,
+                    captureImage: structured.captureImage,
                     sender: senderName,
                     rect: item.bounds(),
                     headRect: head.bounds()

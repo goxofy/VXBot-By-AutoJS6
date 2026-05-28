@@ -50,6 +50,7 @@ function snapshotReplyTask(ctx, reply) {
         isPrivate: ctx.isPrivate === true,
         text: ctx.text || "",
         rawText: ctx.rawText || ctx.text || "",
+        quote: ctx.quote || null,
         reply: reply,
         timestamp: new Date().getTime()
     };
@@ -239,11 +240,22 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
 
     // Filter Logic
     if (!isPrivateChat && this.mentionString) {
-        var originalCount = msgs.length;
-        msgs = msgs.filter(function (m) {
-            return m.text.indexOf(this.mentionString) > -1;
+        var mentionMatched = msgs.filter(function (m) {
+            var candidates = [m.rawText || "", m.text || "", m.mainText || ""];
+            for (var ci = 0; ci < candidates.length; ci++) {
+                if (candidates[ci].indexOf(this.mentionString) > -1) {
+                    return true;
+                }
+            }
+            return false;
         }.bind(this));
-        if (msgs.length === 0) {
+
+        if (mentionMatched.length > 0) {
+            msgs = mentionMatched;
+        } else if (isAtMe && latestMsg) {
+            console.log("Mention badge detected, fallback to latest group message");
+            msgs = [latestMsg];
+        } else {
             console.log("Ignored batch (Strict Mention)");
             return;
         }
@@ -269,7 +281,6 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
 
             var cleanText = mainText;
             if (this.mentionString) {
-                // [Fix] Robust Mention Stripping
                 function escapeRegExp(string) {
                     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 }
@@ -278,9 +289,10 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 cleanText = cleanText.replace(re, "").trim();
             }
 
-            if (!cleanText || cleanText.length === 0) continue;
+            if ((!cleanText || cleanText.length === 0) && !msg.hasImage) continue;
 
-            console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + cleanText.substring(0, 50) + "...]");
+            var displayText = cleanText || "[图片]";
+            console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + displayText.substring(0, 50) + "...]");
 
             var context = {
                 sessionName: normalizedTitle,
@@ -289,10 +301,15 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 rawText: rawText,
                 mainText: cleanText,
                 quote: msg.quote || null,
+                hasImage: msg.hasImage === true,
+                imageKind: msg.imageKind || null,
+                captureImage: msg.captureImage || null,
+                messageKey: senderName + ":" + msg.rect.top + ":" + msg.rect.bottom + ":" + (displayText || "[图片]"),
                 sender: title,
                 user: senderName,
                 isPrivate: isPrivateChat,
                 headRect: null,
+                rect: msg.rect,
                 vchat: vchat
             };
 
@@ -449,22 +466,33 @@ Bot.prototype.processSendQueue = function () {
             //   - Quote + user message: Re: <user_msg>  / <quoted_content>  - <quoted_sender>
             //   - Quote only: Re: <quoted_content>  - <quoted_sender>
             //   - Normal message: Re: <content>
-            var sourceText = task.rawText || task.text;
+            var sourceText = task.text || task.rawText;
             if (sourceText && finalText) {
                 var userMessage = null;
                 var quotedContent = null;
                 var quotedSender = null;
+                var quote = task.quote || null;
 
-                var fullMatch = sourceText.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
-                if (fullMatch) {
-                    userMessage = fullMatch[1].trim();
-                    quotedSender = fullMatch[2].trim();
-                    quotedContent = fullMatch[3].trim();
-                } else {
-                    var simpleMatch = sourceText.match(/^(.+?)[：:]\s*(.+)$/);
-                    if (simpleMatch) {
-                        quotedSender = simpleMatch[1].trim();
-                        quotedContent = simpleMatch[2].trim();
+                if (quote) {
+                    userMessage = task.text || "";
+                    quotedSender = quote.sender || "";
+                    if (quote.type === 'image') {
+                        quotedContent = quote.text || "[图片]";
+                    } else {
+                        quotedContent = quote.text || "";
+                    }
+                } else if (task.rawText && task.rawText !== task.text) {
+                    var fullMatch = task.rawText.match(/^(.+?)\s+(.+?)[：:]\s*(.+)$/);
+                    if (fullMatch) {
+                        userMessage = fullMatch[1].trim();
+                        quotedSender = fullMatch[2].trim();
+                        quotedContent = fullMatch[3].trim();
+                    } else {
+                        var simpleMatch = task.rawText.match(/^(.+?)[：:]\s*(.+)$/);
+                        if (simpleMatch) {
+                            quotedSender = simpleMatch[1].trim();
+                            quotedContent = simpleMatch[2].trim();
+                        }
                     }
                 }
 

@@ -128,20 +128,44 @@ OpenAIBot.prototype.callChatCompletion = function (messages, model) {
 
     var res = http.postJson(this.config.endpoint, {
         model: model || this.config.model,
-        messages: messages
+        messages: messages,
+        stream: false
     }, {
         timeout: timeout,
         headers: this.buildHeaders()
     });
 
-    var body = res.body.json();
-    var reply = this.extractReplyTextFromBody(body);
-    if (reply) {
-        console.log("[OpenAI] Received reply");
-        return reply;
+    var rawBody = this.readResponseBody(res);
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+        console.error("[OpenAI] Chat request failed: " + res.statusCode + " " + rawBody.substring(0, 200));
+        return null;
     }
 
-    console.error("[OpenAI] Empty chat reply: " + JSON.stringify(body));
+    var body = this.tryParseJson(rawBody);
+    if (body) {
+        var reply = this.extractReplyTextFromBody(body);
+        if (reply) {
+            console.log("[OpenAI] Received reply");
+            return reply;
+        }
+
+        console.error("[OpenAI] Empty chat reply: " + rawBody.substring(0, 200));
+        return null;
+    }
+
+    var sseReply = this.extractChatContentFromSse(rawBody);
+    if (sseReply && sseReply.trim()) {
+        console.log("[OpenAI] Received SSE reply");
+        return sseReply.trim();
+    }
+
+    var plainTextReply = (rawBody || "").trim();
+    if (plainTextReply && plainTextReply.indexOf("<") !== 0) {
+        console.log("[OpenAI] Received plain text reply");
+        return plainTextReply;
+    }
+
+    console.error("[OpenAI] Invalid chat response: " + rawBody.substring(0, 200));
     return null;
 };
 
@@ -516,7 +540,10 @@ OpenAIBot.prototype.normalizeIncomingMessage = function (ctx) {
     return {
         text: text || rawText,
         rawText: rawText,
-        quote: quote
+        quote: quote,
+        hasImage: ctx.hasImage === true,
+        imageKind: ctx.imageKind || null,
+        captureImage: ctx.captureImage || null
     };
 };
 
@@ -549,6 +576,68 @@ OpenAIBot.prototype.resolveQuotedImagePath = function (quote) {
     }
 
     return quote.imagePath || null;
+};
+
+OpenAIBot.prototype.resolveDirectImagePath = function (input) {
+    if (!input || input.imageKind !== "direct") return null;
+    if (input.imagePath) return input.imagePath;
+
+    if (input.captureImage) {
+        try {
+            input.imagePath = input.captureImage();
+        } catch (e) {
+            console.error("[OpenAI] Capture direct image failed: " + e);
+        }
+    }
+
+    return input.imagePath || null;
+};
+
+OpenAIBot.prototype.shouldUseVision = function (ctx, input, requestText, isImageRequest) {
+    if (isImageRequest) return false;
+    if (input.quote && input.quote.type === "image") return true;
+    if (ctx.isPrivate && input.hasImage && input.imageKind === "direct") {
+        return !(requestText && String(requestText).trim());
+    }
+    return false;
+};
+
+OpenAIBot.prototype.getVisionPrompt = function (ctx, input, requestText) {
+    var normalizedText = (requestText || "").trim();
+    if (input.quote && input.quote.type === "image") {
+        if (normalizedText) return normalizedText;
+        return ctx.isPrivate ? "请描述这张图片。" : "";
+    }
+    if (ctx.isPrivate && input.hasImage && input.imageKind === "direct") {
+        return normalizedText || "请描述这张图片，并提取其中的重要信息。";
+    }
+    return "";
+};
+
+OpenAIBot.prototype.buildVisionHistoryText = function (ctx, input, prompt) {
+    if (input.quote && input.quote.type === "image") {
+        return "[引用图片] " + (prompt || "请描述这张图片。");
+    }
+    if (ctx.isPrivate && input.hasImage && input.imageKind === "direct") {
+        return "[图片] " + (prompt || "请描述这张图片，并提取其中的重要信息。");
+    }
+    return prompt || "[图片]";
+};
+
+OpenAIBot.prototype.callVisionOpenAI = function (history, prompt, imagePath) {
+    var dataUrl = this.encodeImageFileAsDataUrl(imagePath);
+    if (!dataUrl) return null;
+
+    var messages = (history || []).slice();
+    messages.push({
+        role: "user",
+        content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: dataUrl } }
+        ]
+    });
+
+    return this.callChatCompletion(messages, this.config.model);
 };
 
 OpenAIBot.prototype.decodeDataUrlImage = function (dataUrl) {
@@ -948,29 +1037,48 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         userContext.lastProcessTime = 0;
     }
 
+    var self = this;
+    var requestText = input.hasImage ? text : (text || modelInputText);
+    var isImageRequest = this.isImageRequest(requestText);
+    var useVision = this.shouldUseVision(ctx, input, requestText, isImageRequest);
+    var visionPrompt = useVision ? this.getVisionPrompt(ctx, input, requestText) : "";
+    var visionHistoryText = useVision ? this.buildVisionHistoryText(ctx, input, visionPrompt) : "";
+    var inputText = modelInputText;
+
+    if (input.hasImage && input.imageKind === "direct" && !ctx.isPrivate && !isImageRequest) {
+        console.log("[OpenAI] Ignore direct image in group chat");
+        return false;
+    }
+
+    if (useVision) {
+        inputText = visionHistoryText || "[图片]";
+        if (ctx.messageKey) {
+            inputText += " @" + ctx.messageKey;
+        }
+    } else if (input.hasImage && ctx.messageKey) {
+        inputText = (modelInputText || "[图片请求]") + " @" + ctx.messageKey;
+    } else if (!inputText && ctx.messageKey) {
+        inputText = ctx.messageKey;
+    }
+
     var PROCESS_WINDOW = 5 * 1000;
-    if (modelInputText === userContext.lastInput &&
+    if (inputText === userContext.lastInput &&
         (now - userContext.lastProcessTime) < PROCESS_WINDOW) {
         console.log("[OpenAI] Dedupe: Same message being processed within 5s");
         return false;
     }
 
     var DEDUPE_TTL = 120 * 1000;
-    if (modelInputText === userContext.lastInput &&
-        modelInputText === userContext.lastRepliedInput &&
+    if (inputText === userContext.lastInput &&
+        inputText === userContext.lastRepliedInput &&
         (now - userContext.lastRepliedTime) < DEDUPE_TTL) {
-        console.log("[OpenAI] Dedupe: Already replied to '" + modelInputText.substring(0, 20) + "...' within TTL");
+        console.log("[OpenAI] Dedupe: Already replied to '" + inputText.substring(0, 20) + "...' within TTL");
         return false;
     }
 
     userContext.lastActive = now;
-    userContext.lastInput = modelInputText;
+    userContext.lastInput = inputText;
     userContext.lastProcessTime = now;
-
-    var self = this;
-    var inputText = modelInputText;
-    var requestText = text || modelInputText;
-    var isImageRequest = this.isImageRequest(requestText);
 
     if (isImageRequest) {
         console.log("[OpenAI] Detected image request");
@@ -1028,6 +1136,52 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         });
 
         return true;
+    }
+
+    if (useVision) {
+        if (!visionPrompt) {
+            if (callback) callback(ctx, { type: "text", content: "请在引用图片时补充问题或要求" });
+            return true;
+        }
+
+        var visionImagePath = null;
+        if (input.quote && input.quote.type === "image") {
+            visionImagePath = this.resolveQuotedImagePath(input.quote);
+        } else {
+            visionImagePath = this.resolveDirectImagePath(input);
+        }
+
+        if (!visionImagePath) {
+            if (callback) callback(ctx, { type: "text", content: "读取图片失败，请重试" });
+            return true;
+        }
+
+        console.log("[OpenAI] Starting vision thread for: " + visionHistoryText.substring(0, 20) + "...");
+        threads.start(function () {
+            try {
+                var reply = self.callVisionOpenAI(userContext.history, visionPrompt, visionImagePath);
+                if (reply) {
+                    userContext.history.push({ role: "user", content: visionHistoryText });
+                    userContext.history.push({ role: "assistant", content: reply });
+                    userContext.lastRepliedInput = inputText;
+                    userContext.lastRepliedTime = new Date().getTime();
+                    if (callback) callback(ctx, reply);
+                    return;
+                }
+
+                if (callback) callback(ctx, { type: "text", content: "读图失败，请稍后重试" });
+            } catch (e) {
+                console.error("Async OpenAI Vision Error: " + e);
+                if (callback) callback(ctx, { type: "text", content: "读图失败: " + e });
+            }
+        });
+
+        return true;
+    }
+
+    if (input.hasImage && !modelInputText) {
+        console.log("[OpenAI] Ignore empty image message");
+        return false;
     }
 
     userContext.history.push({ role: "user", content: modelInputText });

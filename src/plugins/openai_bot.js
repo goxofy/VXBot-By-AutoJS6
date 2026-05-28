@@ -1107,24 +1107,28 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         this.sendImageFeedback(ctx);
         threads.start(function () {
             try {
-                var rewrittenPrompt = self.rewriteImagePrompt(requestText);
-                if (!rewrittenPrompt) {
-                    rewrittenPrompt = self.getImageInstructionText(requestText);
-                }
-                if (!rewrittenPrompt) {
+                var imagePrompt = self.getImageInstructionText(requestText);
+                if (!imagePrompt) {
                     if (callback) callback(ctx, { type: "text", content: "请补充图片描述" });
                     return;
                 }
 
-                console.log("[OpenAI] Image prompt: " + rewrittenPrompt.substring(0, 80));
-                var localPath = useImageEdit ? self.callImageEditAPI(rewrittenPrompt, sourceImagePath) : self.callImageAPI(rewrittenPrompt);
+                if (!useImageEdit) {
+                    var rewrittenPrompt = self.rewriteImagePrompt(requestText);
+                    if (rewrittenPrompt) {
+                        imagePrompt = rewrittenPrompt;
+                    }
+                }
+
+                console.log("[OpenAI] Image prompt: " + imagePrompt.substring(0, 80));
+                var localPath = useImageEdit ? self.callImageEditAPI(imagePrompt, sourceImagePath) : self.callImageAPI(imagePrompt);
                 if (localPath) {
                     userContext.lastRepliedInput = inputText;
                     userContext.lastRepliedTime = new Date().getTime();
                     if (callback) callback(ctx, {
                         type: "image",
                         path: localPath,
-                        text: rewrittenPrompt
+                        text: imagePrompt
                     });
                 } else {
                     if (callback) callback(ctx, { type: "text", content: "生成图片失败" });

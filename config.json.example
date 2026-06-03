@@ -30,6 +30,10 @@
       "customHeaders": {
         "X-Custom-Header": "your-value"
       },
+      "visionApiKey": "",
+      "visionBaseUrl": "",
+      "visionEndpoint": "",
+      "visionModel": "",
       "imageEnabled": false,
       "imageKeywords": [
         "画图",
@@ -56,6 +60,67 @@
     "image": {
       "enabled": true,
       "command": "发图"
+    },
+    "scheduledPush": {
+      "enabled": false,
+      "tickSeconds": 30,
+      "requestTimeout": 30000,
+      "jobs": [
+        {
+          "name": "weather_daily_text",
+          "enabled": false,
+          "target": {
+            "sessionName": "天气测试群",
+            "isPrivate": false
+          },
+          "schedule": {
+            "type": "daily",
+            "time": "08:30"
+          },
+          "request": {
+            "method": "GET",
+            "url": "https://example.com/weather",
+            "headers": {
+              "Authorization": "Bearer your-token"
+            }
+          },
+          "extract": {
+            "city": "data.city",
+            "summary": "data.summary",
+            "temp": "data.temp"
+          },
+          "message": {
+            "type": "text",
+            "template": "【天气】{{city}}\n{{summary}}\n温度：{{temp}}°C"
+          },
+          "dedupe": {
+            "keyPath": "data.updated_at"
+          }
+        },
+        {
+          "name": "banner_interval_image",
+          "enabled": false,
+          "target": {
+            "sessionName": "图片测试群",
+            "isPrivate": false
+          },
+          "schedule": {
+            "type": "interval",
+            "everyMinutes": 60
+          },
+          "request": {
+            "method": "GET",
+            "url": "https://example.com/banner"
+          },
+          "message": {
+            "type": "image",
+            "imageUrlPath": "data.image_url"
+          },
+          "dedupe": {
+            "keyPath": "data.version"
+          }
+        }
+      ]
     }
   }
 }

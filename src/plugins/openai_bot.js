@@ -89,6 +89,13 @@ function OpenAIBot(config) {
     this.config.imagePromptModel = this.config.imagePromptModel || this.config.model;
     this.config.imagePromptSystemPrompt = this.config.imagePromptSystemPrompt || "你是一个文生图提示词优化器。你的任务是把用户的原始描述整理成适合图片生成模型使用的高质量 prompt。只输出最终 prompt，不要解释，不要加 markdown，不要加引号。尽量补足风格、构图、镜头、光影、材质、色彩、比例等关键信息，但不要偏离用户意图。";
 
+    // 读图(视觉)后端：留空时回退到主聊天后端
+    this.config.visionApiKey = this.config.visionApiKey || this.config.apiKey;
+    this.config.visionBaseUrl = this.config.visionBaseUrl || this.config.baseUrl;
+    var visionBase = this.config.visionBaseUrl.replace(/\/$/, "");
+    this.config.visionEndpoint = this.config.visionEndpoint || (visionBase + "/chat/completions");
+    this.config.visionModel = this.config.visionModel || this.config.model;
+
     this.contexts = {};
 }
 
@@ -122,17 +129,20 @@ OpenAIBot.prototype.buildHeaders = function (options) {
     return headers;
 };
 
-OpenAIBot.prototype.callChatCompletion = function (messages, model) {
+OpenAIBot.prototype.callChatCompletion = function (messages, model, options) {
+    options = options || {};
+    var endpoint = options.endpoint || this.config.endpoint;
+    var headers = options.headers || this.buildHeaders();
     var timeout = this.config.requestTimeout;
     console.log("Calling OpenAI API... (Timeout: " + (timeout / 1000) + "s)");
 
-    var res = http.postJson(this.config.endpoint, {
+    var res = http.postJson(endpoint, {
         model: model || this.config.model,
         messages: messages,
         stream: false
     }, {
         timeout: timeout,
-        headers: this.buildHeaders()
+        headers: headers
     });
 
     var rawBody = this.readResponseBody(res);
@@ -637,7 +647,13 @@ OpenAIBot.prototype.callVisionOpenAI = function (history, prompt, imagePath) {
         ]
     });
 
-    return this.callChatCompletion(messages, this.config.model);
+    return this.callChatCompletion(messages, this.config.visionModel, {
+        endpoint: this.config.visionEndpoint,
+        headers: this.buildHeaders({
+            apiKey: this.config.visionApiKey,
+            includeCustomHeaders: false
+        })
+    });
 };
 
 OpenAIBot.prototype.decodeDataUrlImage = function (dataUrl) {

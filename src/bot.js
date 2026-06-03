@@ -354,7 +354,12 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
  * Push to Send Queue
  */
 Bot.prototype.enqueueReply = function (ctx, replyText) {
-    this.sendQueue.push(snapshotReplyTask(ctx, replyText));
+    this.queueLock.lock();
+    try {
+        this.sendQueue.push(snapshotReplyTask(ctx, replyText));
+    } finally {
+        this.queueLock.unlock();
+    }
 };
 
 /**

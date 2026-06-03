@@ -92,16 +92,34 @@ function extractQuoteMeta(quoteParts) {
     }
 }
 
-function buildStructuredMessage(textParts, hasPhoto, captureImage) {
+function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhoto) {
     let rawText = (textParts || []).join(" ").trim()
     let mainText = textParts && textParts.length > 0 ? String(textParts[0] || "").trim() : ""
     let quoteParts = textParts && textParts.length > 1 ? textParts.slice(1) : []
     let quoteMeta = extractQuoteMeta(quoteParts)
     let quote = null
     let hasQuoteContext = quoteParts.length > 0 || rawText !== mainText
-    let effectiveHasImage = !!hasPhoto && (textParts.length === 0 || hasQuoteContext)
 
-    if (effectiveHasImage && hasQuoteContext) {
+    // 直接发图：整条消息没有文字，只有图片
+    let isDirectImage = !!hasPhoto && textParts.length === 0
+    // 引用图片判定（区分"图片引用" vs "文字引用"）：
+    // - 强信号：被引内容带"图片"无障碍描述，直接算图片引用；
+    // - 弱信号兜底：有图片节点(宽松命中)但没有抽到引用文字。文字引用一定能抽到
+    //   引用文字；图片引用的被引内容是缩略图、抽不到文字，以此区分，
+    //   避免把文字引用气泡里的装饰性 ImageView 误判成图片引用。
+    let isQuotedImage = hasQuoteContext && (
+        !!hasStrongPhoto ||
+        (!!hasPhoto && !quoteMeta.text)
+    )
+    let effectiveHasImage = isDirectImage || isQuotedImage
+
+    if (hasQuoteContext) {
+        console.log("[quote] hasPhoto=" + (!!hasPhoto) + " strong=" + (!!hasStrongPhoto) +
+            " quoteText='" + (quoteMeta.text || "").substring(0, 15) + "' -> " +
+            (isQuotedImage ? "image" : "text"))
+    }
+
+    if (isQuotedImage) {
         quote = {
             type: "image",
             sender: quoteMeta.sender,
@@ -123,7 +141,7 @@ function buildStructuredMessage(textParts, hasPhoto, captureImage) {
         mainText: quote ? (mainText || rawText) : rawText,
         quote: quote,
         hasImage: effectiveHasImage,
-        imageKind: effectiveHasImage ? (quote && quote.type === "image" ? "quote" : "direct") : null,
+        imageKind: effectiveHasImage ? (isQuotedImage ? "quote" : "direct") : null,
         captureImage: effectiveHasImage ? (captureImage || null) : null
     }
 }
@@ -797,6 +815,36 @@ export default {
      * @param {string} content 消息内容
      * @returns boolean
      */
+    /**
+     * 在 @ 提醒列表里找"第一个成员"（最近发言者，通常即要回复的人）。
+     * 用于对方设置了群昵称、按微信昵称精确匹配失败时的兜底。
+     * 优先锚定"选择提醒的人"标题，只取标题下方的头像，避免误点聊天区头像。
+     *
+     * @returns UiObject | null
+     */
+    findFirstMentionCandidate() {
+        let minTop = 0;
+        let title = text("选择提醒的人").findOne(800) || textContains("提醒的人").findOne(500);
+        if (title) {
+            minTop = title.bounds().bottom;
+        }
+
+        let avatars = className("ImageView").descContains("头像").visibleToUser(true).find();
+        if (!avatars || avatars.empty()) return null;
+
+        let top = null;
+        for (let i = 0; i < avatars.size(); i++) {
+            let av = avatars.get(i);
+            if (!av) continue;
+            let r = av.bounds();
+            if (r.width() < 36 || r.height() < 36) continue;
+            if (r.centerX() < 0 || r.centerY() < 0) continue;
+            if (r.top < minTop) continue;
+            if (!top || r.top < top.bounds().top) top = av;
+        }
+        return top;
+    },
+
     sendAtText(who, content) {
         if (!className("EditText").exists()) {
             this.switchToTextInput();
@@ -849,24 +897,27 @@ export default {
                     mentionInserted = true;
                 }
             } else {
-                console.log("Mention list match failed for: " + who);
+                console.log("Mention list match failed for: " + who + ", searching then picking first candidate");
+                // 对方设了群昵称时：@ 列表主名是群昵称、"昵称: <微信名>" 在副行，
+                // 按微信名精确匹配失败。先用搜索框按微信名过滤，再点第一个成员行。
+                // 注意：不能再用 text(who) 匹配，否则会撞到搜索框里刚输入的同名文字。
                 let searchBar = text("搜索").findOne(1000);
                 if (searchBar) {
                     let sb = searchBar.bounds();
                     click(sb.centerX(), sb.centerY());
                     sleep(500);
                     setText(who);
+                    sleep(1200);
+                }
+
+                let firstCandidate = this.findFirstMentionCandidate();
+                if (firstCandidate) {
+                    let row = firstCandidate.parent();
+                    let rr = (row && row.bounds && row.bounds()) ? row.bounds() : firstCandidate.bounds();
+                    console.log("Clicking first mention candidate row at top=" + rr.top);
+                    click(rr.centerX(), rr.centerY());
                     sleep(1000);
-                    let searchMatch = text(who).visibleToUser(true).findOne(2000);
-                    if (!searchMatch) {
-                        searchMatch = textContains(who).visibleToUser(true).findOne(1000);
-                    }
-                    if (searchMatch) {
-                        let smr = searchMatch.bounds();
-                        click(smr.centerX(), smr.centerY());
-                        sleep(1000);
-                        mentionInserted = true;
-                    }
+                    mentionInserted = true;
                 }
             }
 
@@ -1289,6 +1340,7 @@ export default {
 
                 let messageObject = new MessageObject(item)
                 let hasPhoto = messageObject.isPhoto()
+                let hasStrongPhoto = messageObject.hasStrongPhoto()
                 if (textParts.length === 0 && !hasPhoto) continue
 
                 let cachedQuoteImagePath = null
@@ -1296,7 +1348,7 @@ export default {
                     if (cachedQuoteImagePath !== null) return cachedQuoteImagePath
                     cachedQuoteImagePath = messageObject.savePhotoAndGetPath()
                     return cachedQuoteImagePath
-                })
+                }, hasStrongPhoto)
 
                 messages.unshift({
                     text: structured.text,
@@ -1712,6 +1764,18 @@ const MessageObject = function (UIObject) {
      */
     this.isPhoto = function () {
         return this.getPhotoNode() != null
+    }
+
+    /**
+     * 是否有"强图片信号"（无障碍描述含"图片"）。
+     * 用于区分图片引用 vs 文字引用，避免装饰性 ImageView 造成误判。
+     *
+     * @returns boolean
+     */
+    this.hasStrongPhoto = function () {
+        if (!this.UIObject) return false
+        let directPhoto = this.UIObject.find(descContains("图片"))
+        return !!(directPhoto && directPhoto.nonEmpty())
     }
 
     this.getPhotoNode = function () {

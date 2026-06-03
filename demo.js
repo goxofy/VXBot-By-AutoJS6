@@ -2,6 +2,7 @@ import { Bot } from './src/bot.js'
 import OpenAIBot from './src/plugins/openai_bot.js'
 import ImageBot from './src/plugins/image_bot.js'
 import VideoBot from './src/plugins/video_bot.js'
+import ScheduledPushBot from './src/plugins/scheduled_push.js'
 
 /**
  * VXBot 启动脚本
@@ -137,9 +138,20 @@ if (openaiConfig.enabled !== false) {
         imageEditEndpoint: openaiConfig.imageEditEndpoint || "",
         imageEditModel: openaiConfig.imageEditModel || "",
         imagePromptModel: openaiConfig.imagePromptModel || "",
-        imagePromptSystemPrompt: openaiConfig.imagePromptSystemPrompt || ""
+        imagePromptSystemPrompt: openaiConfig.imagePromptSystemPrompt || "",
+        visionApiKey: openaiConfig.visionApiKey || "",
+        visionBaseUrl: openaiConfig.visionBaseUrl || "",
+        visionEndpoint: openaiConfig.visionEndpoint || "",
+        visionModel: openaiConfig.visionModel || ""
     }));
     console.log("OpenAIBot 已注册");
+}
+
+// [ScheduledPushBot] 定时主动推送插件
+var scheduledPushConfig = pluginsConfig.scheduledPush || {};
+var scheduledPushBot = null;
+if (scheduledPushConfig.enabled === true) {
+    scheduledPushBot = new ScheduledPushBot(scheduledPushConfig, bot);
 }
 
 // ================= 启动 =================
@@ -158,3 +170,8 @@ bot.start({
     mentionString: MENTION_STRING,
     asyncMode: ASYNC_MODE
 });
+
+if (scheduledPushBot) {
+    scheduledPushBot.start();
+    console.log("ScheduledPushBot 已启动, 任务数: " + ((scheduledPushConfig.jobs || []).length));
+}

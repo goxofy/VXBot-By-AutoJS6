@@ -17,3 +17,7 @@ config.json
 
 # Development notes
 Agent.md
+
+# Local scratch / test files
+latest.js
+test/

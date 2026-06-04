@@ -1011,6 +1011,25 @@ OpenAIBot.prototype.handle = function (ctx) {
     return false;
 };
 
+OpenAIBot.prototype.hasRepliedRecently = function (userContext, key, now) {
+    if (!userContext.repliedKeys) return false;
+    var t = userContext.repliedKeys[key];
+    return !!t && (now - t) < this.config.contextTimeout;
+};
+
+OpenAIBot.prototype.markReplied = function (userContext, key) {
+    if (!userContext.repliedKeys) userContext.repliedKeys = {};
+    var now = new Date().getTime();
+    userContext.repliedKeys[key] = now;
+    // 清理过期项，避免无限增长(窗口与上下文寿命一致)
+    var ttl = this.config.contextTimeout;
+    for (var k in userContext.repliedKeys) {
+        if (userContext.repliedKeys.hasOwnProperty(k) && (now - userContext.repliedKeys[k]) > ttl) {
+            delete userContext.repliedKeys[k];
+        }
+    }
+};
+
 OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     var input = this.normalizeIncomingMessage(ctx);
     var text = input.text || "";
@@ -1037,9 +1056,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             history: [{ role: "system", content: this.config.systemPrompt }],
             lastActive: now,
             lastInput: "",
-            lastRepliedInput: "",
-            lastRepliedTime: 0,
-            lastProcessTime: 0
+            lastProcessTime: 0,
+            repliedKeys: {}
         };
     }
     var userContext = this.contexts[contextKey];
@@ -1048,9 +1066,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         userContext.history = [{ role: "system", content: this.config.systemPrompt }];
         userContext.lastActive = now;
         userContext.lastInput = "";
-        userContext.lastRepliedInput = "";
-        userContext.lastRepliedTime = 0;
         userContext.lastProcessTime = 0;
+        userContext.repliedKeys = {};
     }
 
     var self = this;
@@ -1066,15 +1083,12 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         return false;
     }
 
+    // 去重键用"内容"，不掺屏幕位置(ctx.messageKey 含滚动位置)。
+    // 否则同一条老消息重新进群时位置变了，会被当成新消息反复处理(如引用图片反复读图)。
     if (useVision) {
         inputText = visionHistoryText || "[图片]";
-        if (ctx.messageKey) {
-            inputText += " @" + ctx.messageKey;
-        }
-    } else if (input.hasImage && ctx.messageKey) {
-        inputText = (modelInputText || "[图片请求]") + " @" + ctx.messageKey;
-    } else if (!inputText && ctx.messageKey) {
-        inputText = ctx.messageKey;
+    } else if (input.hasImage) {
+        inputText = modelInputText || "[图片请求]";
     }
 
     var PROCESS_WINDOW = 5 * 1000;
@@ -1084,11 +1098,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         return false;
     }
 
-    var DEDUPE_TTL = 120 * 1000;
-    if (inputText === userContext.lastInput &&
-        inputText === userContext.lastRepliedInput &&
-        (now - userContext.lastRepliedTime) < DEDUPE_TTL) {
-        console.log("[OpenAI] Dedupe: Already replied to '" + inputText.substring(0, 20) + "...' within TTL");
+    if (this.hasRepliedRecently(userContext, inputText, now)) {
+        console.log("[OpenAI] Dedupe: Already replied to '" + inputText.substring(0, 20) + "...' (in window)");
         return false;
     }
 
@@ -1139,8 +1150,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
                 console.log("[OpenAI] Image prompt: " + imagePrompt.substring(0, 80));
                 var localPath = useImageEdit ? self.callImageEditAPI(imagePrompt, sourceImagePath) : self.callImageAPI(imagePrompt);
                 if (localPath) {
-                    userContext.lastRepliedInput = inputText;
-                    userContext.lastRepliedTime = new Date().getTime();
+                    self.markReplied(userContext, inputText);
                     if (callback) callback(ctx, {
                         type: "image",
                         path: localPath,
@@ -1183,8 +1193,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
                 if (reply) {
                     userContext.history.push({ role: "user", content: visionHistoryText });
                     userContext.history.push({ role: "assistant", content: reply });
-                    userContext.lastRepliedInput = inputText;
-                    userContext.lastRepliedTime = new Date().getTime();
+                    self.markReplied(userContext, inputText);
                     if (callback) callback(ctx, reply);
                     return;
                 }
@@ -1212,8 +1221,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             var reply = self.callOpenAI(userContext.history);
             if (reply) {
                 userContext.history.push({ role: "assistant", content: reply });
-                userContext.lastRepliedInput = inputText;
-                userContext.lastRepliedTime = new Date().getTime();
+                self.markReplied(userContext, inputText);
                 if (callback) callback(ctx, reply);
                 return;
             }

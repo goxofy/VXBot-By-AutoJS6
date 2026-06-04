@@ -102,21 +102,16 @@ function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhot
 
     // 直接发图：整条消息没有文字，只有图片
     let isDirectImage = !!hasPhoto && textParts.length === 0
-    // 引用图片判定（区分"图片引用" vs "文字引用"）：
-    // - 强信号：被引内容带"图片"无障碍描述，直接算图片引用；
-    // - 弱信号兜底：有图片节点(宽松命中)但没有抽到引用文字。文字引用一定能抽到
-    //   引用文字；图片引用的被引内容是缩略图、抽不到文字，以此区分，
-    //   避免把文字引用气泡里的装饰性 ImageView 误判成图片引用。
-    let isQuotedImage = hasQuoteContext && (
-        !!hasStrongPhoto ||
-        (!!hasPhoto && !quoteMeta.text)
-    )
+    // 引用图片判定：只认强信号(被引内容带"图片"无障碍描述)。
+    // 不能用"宽松 hasPhoto + 引用文字为空"兜底——实测该机型几乎每条消息的
+    // hasPhoto 都为 true(气泡里有装饰性 ImageView)，会把大量纯文字误判成图片引用，
+    // 进而误触发读图、点到头像、回复"读取图片失败"。宁可漏判也不能误判。
+    let isQuotedImage = hasQuoteContext && !!hasStrongPhoto
     let effectiveHasImage = isDirectImage || isQuotedImage
 
-    if (hasQuoteContext) {
-        console.log("[quote] hasPhoto=" + (!!hasPhoto) + " strong=" + (!!hasStrongPhoto) +
-            " quoteText='" + (quoteMeta.text || "").substring(0, 15) + "' -> " +
-            (isQuotedImage ? "image" : "text"))
+    if (isQuotedImage) {
+        console.log("[quote] -> image (hasPhoto=" + (!!hasPhoto) + " strong=" + (!!hasStrongPhoto) +
+            " quoteText='" + (quoteMeta.text || "").substring(0, 15) + "')")
     }
 
     if (isQuotedImage) {
@@ -816,28 +811,45 @@ export default {
      * @returns boolean
      */
     /**
-     * 在 @ 提醒列表里找"第一个成员"（最近发言者，通常即要回复的人）。
-     * 用于对方设置了群昵称、按微信昵称精确匹配失败时的兜底。
-     * 优先锚定"选择提醒的人"标题，只取标题下方的头像，避免误点聊天区头像。
+     * 在 @ 提醒列表/搜索结果里找"要 @ 的成员"节点。
+     * 对方设了群昵称时，@ 列表主名是群昵称、"昵称: <微信名>" 在副行，
+     * 按微信名精确匹配会失败。搜索后结果里会出现含 who 的文本节点，
+     * 直接取它（跳过搜索框 EditText，避免撞上刚输入的同名文字）。
      *
+     * @param {string} who 微信昵称
      * @returns UiObject | null
      */
-    findFirstMentionCandidate() {
-        let minTop = 0;
-        let title = text("选择提醒的人").findOne(800) || textContains("提醒的人").findOne(500);
-        if (title) {
-            minTop = title.bounds().bottom;
+    findFirstMentionCandidate(who) {
+        // 1. 优先：搜索结果里含 who 的文本节点（排除搜索框 EditText）
+        if (who) {
+            let matches = textContains(who).visibleToUser(true).find();
+            if (matches && !matches.empty()) {
+                for (let i = 0; i < matches.size(); i++) {
+                    let m = matches.get(i);
+                    if (!m) continue;
+                    let cn = String(m.className() || "");
+                    if (cn.indexOf("EditText") > -1) continue; // 跳过搜索框
+                    let r = m.bounds();
+                    if (r.centerX() < 0 || r.centerY() < 0) continue;
+                    console.log("Mention candidate by text: '" + m.text() + "' class=" + cn);
+                    return m;
+                }
+            }
         }
 
-        let avatars = className("ImageView").descContains("头像").visibleToUser(true).find();
-        if (!avatars || avatars.empty()) return null;
+        // 2. 兜底：锚定"选择提醒的人"标题，取标题下方最靠上的较大头像
+        let minTop = 0;
+        let title = text("选择提醒的人").findOne(500) || textContains("提醒的人").findOne(300);
+        if (title) minTop = title.bounds().bottom;
 
+        let avatars = className("ImageView").visibleToUser(true).find();
+        if (!avatars || avatars.empty()) return null;
         let top = null;
         for (let i = 0; i < avatars.size(); i++) {
             let av = avatars.get(i);
             if (!av) continue;
             let r = av.bounds();
-            if (r.width() < 36 || r.height() < 36) continue;
+            if (r.width() < 60 || r.height() < 60) continue;
             if (r.centerX() < 0 || r.centerY() < 0) continue;
             if (r.top < minTop) continue;
             if (!top || r.top < top.bounds().top) top = av;
@@ -910,14 +922,24 @@ export default {
                     sleep(1200);
                 }
 
-                let firstCandidate = this.findFirstMentionCandidate();
+                let firstCandidate = this.findFirstMentionCandidate(who);
                 if (firstCandidate) {
-                    let row = firstCandidate.parent();
-                    let rr = (row && row.bounds && row.bounds()) ? row.bounds() : firstCandidate.bounds();
-                    console.log("Clicking first mention candidate row at top=" + rr.top);
+                    // 向上找可点击的行容器，点不到行就点节点本身
+                    let target = firstCandidate;
+                    let p = firstCandidate.parent();
+                    for (let up = 0; up < 4 && p; up++) {
+                        let cn = String(p.className() || "");
+                        if (cn.indexOf("RecyclerView") > -1 || cn.indexOf("ListView") > -1) break;
+                        if (p.clickable && p.clickable()) { target = p; break; }
+                        p = p.parent();
+                    }
+                    let rr = target.bounds();
+                    console.log("Clicking mention candidate row at [" + rr.centerX() + "," + rr.centerY() + "]");
                     click(rr.centerX(), rr.centerY());
                     sleep(1000);
                     mentionInserted = true;
+                } else {
+                    console.log("No mention candidate found after search for: " + who);
                 }
             }
 
@@ -1340,7 +1362,9 @@ export default {
 
                 let messageObject = new MessageObject(item)
                 let hasPhoto = messageObject.isPhoto()
-                let hasStrongPhoto = messageObject.hasStrongPhoto()
+                // 图片引用信号：desc含"图片" 或 存在引用缩略图节点(id h25)。
+                // 不用宽松 hasPhoto，因为头像也会被算成图片导致误判文字消息。
+                let hasStrongPhoto = messageObject.hasStrongPhoto() || messageObject.hasQuotedImage()
                 if (textParts.length === 0 && !hasPhoto) continue
 
                 let cachedQuoteImagePath = null
@@ -1778,7 +1802,27 @@ const MessageObject = function (UIObject) {
         return !!(directPhoto && directPhoto.nonEmpty())
     }
 
+    /**
+     * 引用图片缩略图节点（微信 8.0.39 里 id 为 h25 的小缩略图容器）。
+     * 这是"引用了一张图片"最可靠的信号——文字消息不含该节点。
+     * 注意：id 是混淆产物，可能随微信版本变化。
+     *
+     * @returns UiObject | null
+     */
+    this.getQuotedImageNode = function () {
+        if (!this.UIObject) return null
+        return this.UIObject.findOne(id("h25"))
+    }
+
+    this.hasQuotedImage = function () {
+        return this.getQuotedImageNode() != null
+    }
+
     this.getPhotoNode = function () {
+        // 引用图片：优先点引用缩略图本身，避免误点到头像/装饰图
+        let quoted = this.getQuotedImageNode()
+        if (quoted) return quoted
+
         let nodes = this.getImageNodes()
         if (nodes.length === 0) return null
 

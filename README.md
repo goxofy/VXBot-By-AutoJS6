@@ -16,6 +16,7 @@
 *   **🖼 ImageBot**: 发送随机风景美图 (Picsum)
 *   **🤖 OpenAIBot**: 多轮对话、上下文记忆、智能引用处理；文生图 / 图改图 / 读图，且**读图可配独立后端模型**（文字用 grok、读图用 gpt-4o 之类互不影响）
 *   **⏰ ScheduledPushBot**: 定时拉取外部 API 数据并主动推送文本 / 图片
+*   **🔗 LinkSummaryBot**: 自动识别公众号文章卡片，取原文链接、抓正文并用 LLM 总结后发回（群聊无需 @）
 
 ### 智能特性
 *   **💬 消息引用**: 回复自带原消息引用，自动区分图片引用与文字引用
@@ -125,6 +126,13 @@ npm run demo
     "image": {
       "enabled": true,
       "command": "发图"
+    },
+    "linkSummary": {
+      "enabled": false,
+      "model": "",
+      "fetchTimeout": 30000,
+      "maxContentChars": 6000,
+      "summaryPrompt": ""
     },
     "scheduledPush": {
       "enabled": false,
@@ -276,6 +284,21 @@ npm run demo
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | 是否启用随机发图插件。 | `true` / `false`；默认 `true`（不填也启用）。 |
 | `command` | `string` | 发图插件触发指令。 | 默认 `发图`；精确匹配该指令才触发。 |
+
+### `plugins.linkSummary` 配置
+
+`LinkSummaryBot` 自动处理**公众号文章卡片**：在白名单会话里(群聊**无需 @bot**)检测到公众号文章卡片后，点开卡片取原文链接(`mp.weixin.qq.com`)、抓正文、用 LLM 总结，再把总结**直接发回**该聊天(群里不 @ 人)。LLM 调用复用 `plugins.openai` 的 `apiKey / baseUrl / model`。
+
+> 注意：① 仅处理公众号文章卡片(`mp.weixin` 文章)，不处理其它分享卡片。② 取链接依赖微信 8.0.39 的控件 id(`b3o`/`by3` 等)，升级微信可能失效。③ 取链接会**短暂打开文章页再返回**，属正常。④ 已用"卡片标题"去重，同一张卡片 20 分钟内只处理一次。
+
+| 参数 | 类型 | 如何填写 | 可选值 / 默认行为 |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `boolean` | 是否启用 LinkSummaryBot。 | `true` / `false`；默认 `false`（需显式开启）。 |
+| `model` | `string` | 总结使用的模型名。 | 默认 `""`：回退到 `plugins.openai.model`。 |
+| `fetchTimeout` | `number` | 抓取文章网页的超时，单位毫秒。 | 默认 `30000`。 |
+| `maxContentChars` | `number` | 喂给模型的正文最大字符数(超出截断)。 | 默认 `6000`。 |
+| `summaryPrompt` | `string` | 总结用的系统提示词。 | 默认 `""`：使用内置默认提示词。 |
+| `apiKey` / `baseUrl` / `endpoint` | `string` | 可选，单独指定总结后端。 | 留空时回退到 `plugins.openai` 对应值。 |
 
 ### `plugins.scheduledPush` 配置
 

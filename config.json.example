@@ -61,6 +61,13 @@
       "enabled": true,
       "command": "发图"
     },
+    "linkSummary": {
+      "enabled": false,
+      "model": "",
+      "fetchTimeout": 30000,
+      "maxContentChars": 6000,
+      "summaryPrompt": ""
+    },
     "scheduledPush": {
       "enabled": false,
       "tickSeconds": 30,

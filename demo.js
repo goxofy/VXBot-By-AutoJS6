@@ -3,6 +3,7 @@ import OpenAIBot from './src/plugins/openai_bot.js'
 import ImageBot from './src/plugins/image_bot.js'
 import VideoBot from './src/plugins/video_bot.js'
 import ScheduledPushBot from './src/plugins/scheduled_push.js'
+import LinkSummaryBot from './src/plugins/link_summary_bot.js'
 
 /**
  * VXBot 启动脚本
@@ -110,6 +111,26 @@ if (videoConfig.enabled !== false) {
 
 // [OpenAIBot] AI 对话插件 (兜底)
 var openaiConfig = pluginsConfig.openai || {};
+
+// [LinkSummaryBot] 公众号文章卡片自动总结 (复用 openai 的 key/baseUrl/model)
+var linkSummaryConfig = pluginsConfig.linkSummary || {};
+if (linkSummaryConfig.enabled === true) {
+    bot.register(new LinkSummaryBot({
+        enabled: true,
+        apiKey: linkSummaryConfig.apiKey || openaiConfig.apiKey || "",
+        baseUrl: linkSummaryConfig.baseUrl || openaiConfig.baseUrl || "https://api.openai.com/v1",
+        endpoint: linkSummaryConfig.endpoint || openaiConfig.endpoint || "",
+        model: linkSummaryConfig.model || openaiConfig.model || "gpt-3.5-turbo",
+        requestTimeout: linkSummaryConfig.requestTimeout || openaiConfig.requestTimeout || 90000,
+        fetchTimeout: linkSummaryConfig.fetchTimeout || 30000,
+        customHeaders: linkSummaryConfig.customHeaders || openaiConfig.customHeaders || {},
+        whitelist: WHITELIST,
+        maxContentChars: linkSummaryConfig.maxContentChars || 6000,
+        summaryPrompt: linkSummaryConfig.summaryPrompt || ""
+    }));
+    console.log("LinkSummaryBot 已注册");
+}
+
 if (openaiConfig.enabled !== false) {
     if (!openaiConfig.apiKey || openaiConfig.apiKey.indexOf("your-api-key") > -1) {
         console.warn("警告: OpenAI API Key 未配置或使用默认值");

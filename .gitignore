@@ -21,3 +21,8 @@ Agent.md
 # Local scratch / test files
 latest.js
 test/
+
+# Debug screenshots / device logs
+*.jpg
+*.png
+autojs6-log*.txt

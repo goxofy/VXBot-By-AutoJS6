@@ -241,6 +241,8 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
     // Filter Logic
     if (!isPrivateChat && this.mentionString) {
         var mentionMatched = msgs.filter(function (m) {
+            // 公众号文章卡片：群里不需要 @ 也放行(由 LinkSummaryBot 处理)
+            if (m.card) return true;
             var candidates = [m.rawText || "", m.text || "", m.mainText || ""];
             for (var ci = 0; ci < candidates.length; ci++) {
                 if (candidates[ci].indexOf(this.mentionString) > -1) {
@@ -289,9 +291,9 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 cleanText = cleanText.replace(re, "").trim();
             }
 
-            if ((!cleanText || cleanText.length === 0) && !msg.hasImage) continue;
+            if ((!cleanText || cleanText.length === 0) && !msg.hasImage && !msg.card) continue;
 
-            var displayText = cleanText || "[图片]";
+            var displayText = cleanText || (msg.card ? "[公众号卡片]" : "[图片]");
             console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + displayText.substring(0, 50) + "...]");
 
             var context = {
@@ -304,6 +306,7 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 hasImage: msg.hasImage === true,
                 imageKind: msg.imageKind || null,
                 captureImage: msg.captureImage || null,
+                card: msg.card || null,
                 messageKey: senderName + ":" + msg.rect.top + ":" + msg.rect.bottom + ":" + (displayText || "[图片]"),
                 sender: title,
                 user: senderName,

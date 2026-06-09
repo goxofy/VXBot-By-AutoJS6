@@ -92,6 +92,154 @@ function extractQuoteMeta(quoteParts) {
     }
 }
 
+/**
+ * 兜底读取剪贴板：Android 10+ 后台 getClip() 常读不到前台 App 复制的内容。
+ * 回到聊天页后，把剪贴板粘贴进微信输入框(前台、允许粘贴/读取)，读出链接，再清空输入框。
+ *
+ * @returns string | null
+ */
+function pasteReadClearUrl() {
+    let input = className("EditText").findOne(2000)
+    if (!input) {
+        console.warn("[vchat] chat input not found for paste-read")
+        return null
+    }
+    try {
+        input.click()
+        sleep(300)
+        input.setText("") // 隔离旧草稿
+        sleep(200)
+        let ok = false
+        try { ok = input.paste() } catch (e) { ok = false }
+        if (!ok) {
+            let r = input.bounds()
+            longClick(r.centerX(), r.centerY())
+            sleep(800)
+            let pb = text("粘贴").findOne(1000) || textContains("粘贴").findOne(500)
+            if (pb) { pb.click(); sleep(300) }
+        }
+        sleep(500)
+        let cur = className("EditText").findOne(800)
+        let val = cur ? (cur.text() || "") : ""
+        console.log("[vchat] paste-read got: " + val.substring(0, 100))
+        let m = val.match(/https?:\/\/[^\s'"]+/)
+        return m ? m[0] : null
+    } catch (e) {
+        console.error("[vchat] paste-read failed: " + e)
+        return null
+    } finally {
+        try {
+            let ci = className("EditText").findOne(500)
+            if (ci) ci.setText("") // 清空，避免把链接留在草稿/误发
+        } catch (e2) {}
+    }
+}
+
+/**
+ * 打开公众号文章卡片并复制其原始链接。
+ * 流程：点卡片打开文章页 → 点右上角"…"(id by3) → 底部"复制链接" → 读剪贴板 → 返回聊天。
+ * 注意：by3 等 id 为微信 8.0.39 混淆产物，可能随版本变化。
+ *
+ * @param {object} cardRect 卡片可点区域(含 centerX/centerY)
+ * @returns string | null mp.weixin 链接，失败返回 null
+ */
+function openCardAndCopyUrl(cardRect) {
+    if (!cardRect) return null
+
+    let opened = false
+    try {
+        console.log("[vchat] Opening official-account card to copy url")
+        click(cardRect.centerX(), cardRect.centerY())
+        opened = true
+
+        // 等文章页工具栏出现(右上角"…" id by3)
+        let more = null
+        for (let i = 0; i < 16; i++) {
+            more = id("by3").findOne(300)
+            if (more) break
+            sleep(300)
+        }
+        if (!more) {
+            console.warn("[vchat] Article '…' button (by3) not found")
+            return null
+        }
+
+        // 公众号文章正文要 ~5s 才加载完，加载完前点"…"分享面板里可能还没有"复制链接"。
+        // 留点加载时间，再"点…→找复制链接"重试若干次(没找到=面板没开，重点是安全的)。
+        sleep(2500)
+        let copy = null
+        for (let attempt = 0; attempt < 4; attempt++) {
+            let btn = id("by3").findOne(500) || more
+            let mr = btn.bounds()
+            click(mr.centerX(), mr.centerY())
+            // 这一排动作文字 id 都是 knx，但 text=复制链接 的只有这一个
+            copy = id("knx").text("复制链接").findOne(3000) || text("复制链接").findOne(800)
+            if (copy) break
+            console.log("[vchat] Share menu not ready, retry " + (attempt + 1))
+            sleep(1500)
+        }
+        if (!copy) {
+            console.warn("[vchat] '复制链接' not found after retries")
+            return null
+        }
+
+        // 菜单刚弹出还在动画，等它稳定再点(之前点太快、菜单没弹完就点了 → 不生效)
+        sleep(1000)
+
+        // 先清空剪贴板：便于判断是否真的复制成功(没点中则读到空)
+        try { setClip("") } catch (e) {}
+
+        // 重新取一次(动画结束后状态/坐标稳定)，直接点"复制链接"文字节点
+        let copyNode = id("knx").text("复制链接").findOne(1500) || copy
+        let cnb = copyNode.bounds()
+        console.log("[vchat] click 复制链接 @ [" + cnb.centerX() + "," + cnb.centerY() + "]")
+        click(cnb.centerX(), cnb.centerY())
+        sleep(1200)
+
+        // 1) 直接读剪贴板
+        let url = null
+        for (let r = 0; r < 4; r++) {
+            let clip = getClip()
+            let raw = clip ? String(clip).trim() : ""
+            if (raw) {
+                console.log("[vchat] clip after copy: " + raw.substring(0, 100))
+                let m = raw.match(/https?:\/\/[^\s'"]+/)
+                url = m ? m[0] : null
+                break
+            }
+            sleep(400)
+        }
+
+        // 2) 后台 getClip 读不到(Android 10+ 限制)时：回聊天页粘贴进输入框读取
+        if (!url) {
+            console.log("[vchat] clip empty/invalid, fallback to paste-read")
+            for (let i = 0; i < 6; i++) {
+                if (isChatScreen()) break
+                back()
+                sleep(600)
+            }
+            opened = false
+            if (isChatScreen()) {
+                url = pasteReadClearUrl()
+            } else {
+                console.warn("[vchat] not back in chat, skip paste-read")
+            }
+        }
+        return url
+    } catch (e) {
+        console.error("[vchat] Open card / copy url failed: " + e)
+        return null
+    } finally {
+        if (opened) {
+            for (let i = 0; i < 6; i++) {
+                if (isChatScreen()) break
+                back()
+                sleep(600)
+            }
+        }
+    }
+}
+
 function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhoto) {
     let rawText = (textParts || []).join(" ").trim()
     let mainText = textParts && textParts.length > 0 ? String(textParts[0] || "").trim() : ""
@@ -1374,6 +1522,20 @@ export default {
                     return cachedQuoteImagePath
                 }, hasStrongPhoto)
 
+                // 公众号文章卡片：挂 card 字段，captureUrl 懒加载取原始链接
+                let card = null
+                let cardTitleNode = messageObject.getCardTitleNode()
+                let cardTitle = cardTitleNode ? (cardTitleNode.text() || "").trim() : ""
+                if (cardTitleNode && cardTitle) {
+                    let cardRect = cardTitleNode.bounds()
+                    let cardDigest = messageObject.getCardDigest()
+                    card = {
+                        title: cardTitle,
+                        digest: cardDigest,
+                        captureUrl: function () { return openCardAndCopyUrl(cardRect) }
+                    }
+                }
+
                 messages.unshift({
                     text: structured.text,
                     rawText: structured.rawText,
@@ -1382,6 +1544,7 @@ export default {
                     hasImage: structured.hasImage,
                     imageKind: structured.imageKind,
                     captureImage: structured.captureImage,
+                    card: card,
                     sender: senderName,
                     rect: item.bounds(),
                     headRect: head.bounds()
@@ -1816,6 +1979,26 @@ const MessageObject = function (UIObject) {
 
     this.hasQuotedImage = function () {
         return this.getQuotedImageNode() != null
+    }
+
+    /**
+     * 公众号文章卡片：标题节点 id b3o、摘要预览节点 id b2z(微信 8.0.39)。
+     * 标题节点存在即判定这条消息是一张公众号文章卡片。
+     * 注意：id 是混淆产物，可能随微信版本变化。
+     */
+    this.getCardTitleNode = function () {
+        if (!this.UIObject) return null
+        return this.UIObject.findOne(id("b3o"))
+    }
+
+    this.isOfficialCard = function () {
+        return this.getCardTitleNode() != null
+    }
+
+    this.getCardDigest = function () {
+        if (!this.UIObject) return ""
+        let n = this.UIObject.findOne(id("b2z"))
+        return n ? (n.text() || "") : ""
     }
 
     this.getPhotoNode = function () {

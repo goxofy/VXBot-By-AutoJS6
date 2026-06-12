@@ -93,6 +93,7 @@ npm run demo
       "model": "gpt-4o-mini",
       "requestTimeout": 90000,
       "contextTimeout": 1200000,
+      "failureCooldown": 90000,
       "systemPrompt": "You are a helpful assistant.",
       "customHeaders": {
         "X-Custom-Header": "your-value"
@@ -121,7 +122,8 @@ npm run demo
     "video": {
       "enabled": true,
       "serverUrl": "http://127.0.0.1:8080",
-      "command": "下载"
+      "command": "下载",
+      "maxDownloadMB": 200
     },
     "image": {
       "enabled": true,
@@ -220,6 +222,7 @@ npm run demo
 | `model` | `string` | 普通文本聊天默认使用的模型名。读图默认也用它，除非单独配置 `visionModel`。 | 默认 `gpt-3.5-turbo`；可填任意后端支持的模型 ID，例如 `gpt-4o-mini`、`gpt-5.4`、`claude-sonnet-4-6`、`grok-4`。 |
 | `requestTimeout` | `number` | 单次 HTTP 请求超时，单位毫秒。 | 默认 `90000`；常用 `90000`、`180000`、`360000`。 |
 | `contextTimeout` | `number` | 上下文过期时间，单位毫秒。 | 默认 `1200000`（20 分钟）；超时后会重置会话上下文。 |
+| `failureCooldown` | `number` | 上游请求失败后的冷却时间，单位毫秒。 | 默认 `90000`（90 秒）；失败时会回一句提示，冷却期内同一条消息不重试也不重复提示，冷却后自动重试，避免上游 503 等故障时刷屏。 |
 | `systemPrompt` | `string` | 主聊天系统提示词。 | 默认 `"You are a helpful assistant."`；可为空或自定义人格 / 规则。 |
 | `customHeaders` | `object` | 主聊天请求额外 Header。 | 默认 `{}`；常见用于会话路由、鉴权透传。 |
 | `blacklist` | `string[]` | 可选，会话黑名单。 | 默认 `[]`：不额外屏蔽。黑名单优先于 OpenAIBot 响应。 |
@@ -277,6 +280,7 @@ npm run demo
 | `enabled` | `boolean` | 是否启用 VideoBot。 | `true` / `false`；默认 `true`（不填也启用）。 |
 | `serverUrl` | `string` | 解析/下载服务地址。 | 默认 `http://127.0.0.1:8080`；例如 `http://127.0.0.1:8080`。 |
 | `command` | `string` | 视频插件触发指令。 | 默认 `下载`；消息以该命令开头时触发。 |
+| `maxDownloadMB` | `number` | 单个视频下载大小上限，单位 MB。 | 默认 `200`；视频超过上限时直接跳过并回提示。下载已是 okhttp 流式不会 OOM，此项主要防止超大文件占满磁盘 / 浪费带宽。 |
 
 ### `plugins.image` 配置
 

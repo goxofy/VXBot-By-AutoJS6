@@ -26,6 +26,7 @@
       "model": "gpt-3.5-turbo",
       "requestTimeout": 90000,
       "contextTimeout": 1200000,
+      "failureCooldown": 90000,
       "systemPrompt": "You are a helpful assistant.",
       "customHeaders": {
         "X-Custom-Header": "your-value"
@@ -55,7 +56,8 @@
     "video": {
       "enabled": true,
       "serverUrl": "http://127.0.0.1:8080",
-      "command": "下载"
+      "command": "下载",
+      "maxDownloadMB": 200
     },
     "image": {
       "enabled": true,

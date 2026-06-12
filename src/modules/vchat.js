@@ -143,7 +143,7 @@ function pasteReadClearUrl() {
  * @param {object} cardRect 卡片可点区域(含 centerX/centerY)
  * @returns string | null mp.weixin 链接，失败返回 null
  */
-function openCardAndCopyUrl(cardRect) {
+function openCardAndCopyUrl(cardRect, cardTitle) {
     if (!cardRect) return null
 
     let opened = false
@@ -164,9 +164,21 @@ function openCardAndCopyUrl(cardRect) {
             return null
         }
 
-        // 公众号文章正文要 ~5s 才加载完，加载完前点"…"分享面板里可能还没有"复制链接"。
-        // 留点加载时间，再"点…→找复制链接"重试若干次(没找到=面板没开，重点是安全的)。
-        sleep(2500)
+        // 关键：必须等文章正文真正加载完再点"…"，否则分享面板里没有"复制链接"，失败率很高。
+        // 用"文章标题文字出现"作为加载完成信号(标题=卡片标题，加载好后会渲染到文章页)。
+        let titlePrefix = (cardTitle || "").trim().substring(0, 8)
+        if (titlePrefix) {
+            let loaded = false
+            for (let i = 0; i < 24; i++) { // 最多约 12s
+                if (textContains(titlePrefix).findOne(300)) { loaded = true; break }
+                sleep(200)
+            }
+            console.log("[vchat] article loaded=" + loaded + " (wait title: " + titlePrefix + ")")
+            sleep(1500) // 标题出现后再稳一下，确保分享功能就绪
+        } else {
+            sleep(4000) // 没标题可等时，退回较长固定等待
+        }
+
         let copy = null
         for (let attempt = 0; attempt < 4; attempt++) {
             let btn = id("by3").findOne(500) || more
@@ -1532,7 +1544,7 @@ export default {
                     card = {
                         title: cardTitle,
                         digest: cardDigest,
-                        captureUrl: function () { return openCardAndCopyUrl(cardRect) }
+                        captureUrl: function () { return openCardAndCopyUrl(cardRect, cardTitle) }
                     }
                 }
 

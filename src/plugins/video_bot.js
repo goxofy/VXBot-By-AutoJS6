@@ -8,6 +8,9 @@ function VideoBot(config) {
 
     this.apiUrl = this.config.apiUrl || (baseUrl + "/video/share/url/parse");
     this.triggerCommand = this.config.command || "下载";
+
+    // 下载大小上限(MB)，默认 200MB。okhttp 已是流式不会 OOM，此处主要防止超大文件占满磁盘/浪费带宽。
+    this.maxDownloadBytes = (this.config.maxDownloadMB || 200) * 1024 * 1024;
 }
 
 VideoBot.prototype.safeClose = function (closeable) {
@@ -103,6 +106,13 @@ VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
             } catch (e) {
             }
 
+            if (this.maxDownloadBytes > 0 && expectedLength > this.maxDownloadBytes) {
+                var capMb = Math.round(this.maxDownloadBytes / 1024 / 1024);
+                var vidMb = Math.round(expectedLength / 1024 / 1024);
+                console.warn("[VideoBot] Video too large: " + vidMb + "MB > cap " + capMb + "MB, skip");
+                return { path: null, error: "视频太大(" + vidMb + "MB，上限 " + capMb + "MB)，已跳过下载" };
+            }
+
             // 真流式：byteStream() 不会把整段视频读进内存
             input = new java.io.BufferedInputStream(body.byteStream());
             output = new java.io.BufferedOutputStream(new java.io.FileOutputStream(tempFile));
@@ -110,11 +120,16 @@ VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
             var buffer = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 8192);
             var bytesRead = 0;
             var totalBytes = 0;
+            var oversized = false;
 
             while ((bytesRead = input.read(buffer)) !== -1) {
                 if (bytesRead > 0) {
                     output.write(buffer, 0, bytesRead);
                     totalBytes += bytesRead;
+                    if (this.maxDownloadBytes > 0 && totalBytes > this.maxDownloadBytes) {
+                        oversized = true;
+                        break;
+                    }
                 }
             }
             output.flush();
@@ -127,6 +142,12 @@ VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
             body = null;
             this.safeClose(response);
             response = null;
+
+            if (oversized) {
+                var capMb2 = Math.round(this.maxDownloadBytes / 1024 / 1024);
+                console.warn("[VideoBot] Video exceeded cap " + capMb2 + "MB during stream, abort");
+                return { path: null, error: "视频太大(超过 " + capMb2 + "MB)，已跳过下载" };
+            }
 
             var actualLength = tempFile.length();
             if (totalBytes <= 0 || actualLength <= 0) {
@@ -162,136 +183,6 @@ VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
 
     return { path: null, error: lastError };
 };
-
-/*
- * [旧版·已注释保留] 基于 AutoJS6 http.get 的下载实现。
- * 隐患：http.get 可能整体缓冲响应体，且 body.bytes() 兜底会把整段视频一次性读入内存，
- *       大视频(实测 ~323MB)直接 OOM。先用上面的 okhttp 版测试，确认稳定后再删除本块。
- *
-VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
-    var maxAttempts = 3;
-    var retryDelays = [0, 1000, 2000];
-    var timeout = 180000;
-    var tempPath = savePath + ".part";
-    var finalFile = new java.io.File(savePath);
-    var tempFile = new java.io.File(tempPath);
-    var lastError = "视频下载失败，请稍后重试";
-
-    files.ensureDir("/sdcard/DCIM/Camera/");
-
-    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-        if (retryDelays[attempt - 1] > 0) {
-            sleep(retryDelays[attempt - 1]);
-        }
-
-        this.cleanupFile(tempPath);
-        this.cleanupFile(savePath);
-
-        var res = null;
-        var body = null;
-        var input = null;
-        var output = null;
-        var success = false;
-
-        try {
-            console.log("[VideoBot] Download attempt " + attempt + "/" + maxAttempts + ": " + realUrl);
-            res = http.get(realUrl, { timeout: timeout });
-
-            if (!res) {
-                throw new java.io.IOException("empty response");
-            }
-
-            if (res.statusCode !== 200) {
-                lastError = "视频下载失败: " + res.statusCode;
-                console.error("[VideoBot] Download failed: " + res.statusCode);
-                if (!this.shouldRetryDownloadStatus(res.statusCode)) {
-                    return { path: null, error: lastError };
-                }
-                continue;
-            }
-
-            body = res.body;
-            if (!body) {
-                throw new java.io.IOException("empty response body");
-            }
-
-            var expectedLength = -1;
-            try {
-                expectedLength = body.contentLength();
-            } catch (e) {
-            }
-
-            var totalBytes = 0;
-            var rawStream = null;
-            if (body.byteStream) {
-                rawStream = body.byteStream();
-            } else if (body.inputStream) {
-                rawStream = body.inputStream();
-            }
-
-            if (rawStream) {
-                input = new java.io.BufferedInputStream(rawStream);
-                output = new java.io.BufferedOutputStream(new java.io.FileOutputStream(tempFile));
-
-                var buffer = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 8192);
-                var bytesRead = 0;
-
-                while ((bytesRead = input.read(buffer)) !== -1) {
-                    if (bytesRead > 0) {
-                        output.write(buffer, 0, bytesRead);
-                        totalBytes += bytesRead;
-                    }
-                }
-                output.flush();
-            } else if (body.bytes) {
-                var allBytes = body.bytes();
-                files.writeBytes(tempPath, allBytes);
-                totalBytes = allBytes.length || 0;
-            } else {
-                throw new java.io.IOException("response body reader unavailable");
-            }
-
-            this.safeClose(output);
-            output = null;
-            this.safeClose(input);
-            input = null;
-            this.safeClose(body);
-            body = null;
-
-            var actualLength = tempFile.length();
-            if (totalBytes <= 0 || actualLength <= 0) {
-                throw new java.io.IOException("downloaded empty file");
-            }
-            if (expectedLength > 0 && actualLength !== expectedLength) {
-                throw new java.io.IOException("downloaded size mismatch: expected=" + expectedLength + ", actual=" + actualLength);
-            }
-
-            this.cleanupFile(savePath);
-            if (!tempFile.renameTo(finalFile)) {
-                throw new java.io.IOException("rename temp file failed");
-            }
-
-            success = true;
-            console.log("[VideoBot] Download Complete");
-            return { path: savePath, error: null };
-        } catch (e) {
-            lastError = "视频下载失败，请稍后重试";
-            console.error("[VideoBot] Download attempt " + attempt + " failed: " + e);
-        } finally {
-            this.safeClose(output);
-            this.safeClose(input);
-            this.safeClose(body);
-
-            if (!success) {
-                this.cleanupFile(tempPath);
-                this.cleanupFile(savePath);
-            }
-        }
-    }
-
-    return { path: null, error: lastError };
-};
-*/
 
 VideoBot.prototype.handleAsync = function (ctx, callback) {
     if (!ctx.text) return false;

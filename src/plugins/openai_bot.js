@@ -61,6 +61,7 @@ function OpenAIBot(config) {
     this.config.model = this.config.model || "gpt-3.5-turbo";
     this.config.requestTimeout = this.config.requestTimeout || 90000;
     this.config.contextTimeout = this.config.contextTimeout || 2 * 60 * 60 * 1000;
+    this.config.failureCooldown = this.config.failureCooldown || 90 * 1000;
     this.config.whitelist = this.config.whitelist || [];
     this.config.blacklist = this.config.blacklist || [];
     this.config.systemPrompt = this.config.systemPrompt || "You are a helpful assistant.";
@@ -1056,6 +1057,29 @@ OpenAIBot.prototype.clearInFlight = function (userContext, key) {
     if (userContext.inFlight) delete userContext.inFlight[key];
 };
 
+OpenAIBot.prototype.isInFailureCooldown = function (userContext, key, now) {
+    if (!userContext.failedKeys) return false;
+    var t = userContext.failedKeys[key];
+    return !!t && (now - t) < this.config.failureCooldown;
+};
+
+OpenAIBot.prototype.markFailed = function (userContext, key) {
+    if (!userContext.failedKeys) userContext.failedKeys = {};
+    var now = new Date().getTime();
+    userContext.failedKeys[key] = now;
+    // 清理过期项
+    var ttl = this.config.failureCooldown;
+    for (var k in userContext.failedKeys) {
+        if (userContext.failedKeys.hasOwnProperty(k) && (now - userContext.failedKeys[k]) > ttl) {
+            delete userContext.failedKeys[k];
+        }
+    }
+};
+
+OpenAIBot.prototype.clearFailed = function (userContext, key) {
+    if (userContext.failedKeys) delete userContext.failedKeys[key];
+};
+
 OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     var input = this.normalizeIncomingMessage(ctx);
     var text = input.text || "";
@@ -1084,7 +1108,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             lastInput: "",
             lastProcessTime: 0,
             repliedKeys: {},
-            inFlight: {}
+            inFlight: {},
+            failedKeys: {}
         };
     }
     var userContext = this.contexts[contextKey];
@@ -1096,6 +1121,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         userContext.lastProcessTime = 0;
         userContext.repliedKeys = {};
         userContext.inFlight = {};
+        userContext.failedKeys = {};
     }
 
     var self = this;
@@ -1135,6 +1161,12 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     // 防止慢请求(读图 ~2min、文字 ~20s)在回复落地前被每轮轮询反复重派 → 重复读图/重复回复。
     if (this.isInFlight(userContext, inputText, now)) {
         console.log("[OpenAI] Dedupe: request already in-flight for '" + inputText.substring(0, 20) + "...'");
+        return false;
+    }
+
+    // 失败冷却：上游刚失败过的同一条消息，冷却期内不重派(也就不重发提示)，冷却后自动重试。
+    if (this.isInFailureCooldown(userContext, inputText, now)) {
+        console.log("[OpenAI] Skip: in failure cooldown for '" + inputText.substring(0, 20) + "...'");
         return false;
     }
 
@@ -1264,16 +1296,23 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             if (reply) {
                 userContext.history.push({ role: "assistant", content: reply });
                 self.markReplied(userContext, inputText);
+                self.clearFailed(userContext, inputText);
                 if (callback) callback(ctx, reply);
                 return;
             }
+            // 请求失败(上游 503 / 鉴权失败 / 空响应)：撤回刚入队的 user 消息，给用户一句提示，
+            // 不再无声丢弃；记失败冷却，避免轮询每隔十几秒重试刷屏，冷却后自动重试。
+            userContext.history.pop();
+            self.markFailed(userContext, inputText);
+            if (callback) callback(ctx, { type: "text", content: "AI 服务暂时不可用，请稍后再试" });
         } catch (e) {
             console.error("Async OpenAI Error: " + e);
+            userContext.history.pop();
+            self.markFailed(userContext, inputText);
+            if (callback) callback(ctx, { type: "text", content: "AI 服务出错，请稍后再试" });
         } finally {
             self.clearInFlight(userContext, inputText);
         }
-
-        userContext.history.pop();
     });
 
     return true;

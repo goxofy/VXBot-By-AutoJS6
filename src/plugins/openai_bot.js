@@ -1030,6 +1030,32 @@ OpenAIBot.prototype.markReplied = function (userContext, key) {
     }
 };
 
+OpenAIBot.prototype.isInFlight = function (userContext, key, now) {
+    if (!userContext.inFlight) return false;
+    var t = userContext.inFlight[key];
+    if (!t) return false;
+    // 超过 (请求超时 + 60s) 仍未清除，视为该线程已死(如 OOM / 被系统杀)，放行以便重试
+    var staleness = this.config.requestTimeout + 60 * 1000;
+    return (now - t) < staleness;
+};
+
+OpenAIBot.prototype.markInFlight = function (userContext, key) {
+    if (!userContext.inFlight) userContext.inFlight = {};
+    var now = new Date().getTime();
+    userContext.inFlight[key] = now;
+    // 顺手清理早已过期的残留项，避免无限增长
+    var staleness = this.config.requestTimeout + 60 * 1000;
+    for (var k in userContext.inFlight) {
+        if (userContext.inFlight.hasOwnProperty(k) && (now - userContext.inFlight[k]) > staleness) {
+            delete userContext.inFlight[k];
+        }
+    }
+};
+
+OpenAIBot.prototype.clearInFlight = function (userContext, key) {
+    if (userContext.inFlight) delete userContext.inFlight[key];
+};
+
 OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     var input = this.normalizeIncomingMessage(ctx);
     var text = input.text || "";
@@ -1057,7 +1083,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             lastActive: now,
             lastInput: "",
             lastProcessTime: 0,
-            repliedKeys: {}
+            repliedKeys: {},
+            inFlight: {}
         };
     }
     var userContext = this.contexts[contextKey];
@@ -1068,6 +1095,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         userContext.lastInput = "";
         userContext.lastProcessTime = 0;
         userContext.repliedKeys = {};
+        userContext.inFlight = {};
     }
 
     var self = this;
@@ -1103,6 +1131,13 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         return false;
     }
 
+    // 关键去重：同一条消息已有异步请求在途(尚未回复)时直接丢弃。
+    // 防止慢请求(读图 ~2min、文字 ~20s)在回复落地前被每轮轮询反复重派 → 重复读图/重复回复。
+    if (this.isInFlight(userContext, inputText, now)) {
+        console.log("[OpenAI] Dedupe: request already in-flight for '" + inputText.substring(0, 20) + "...'");
+        return false;
+    }
+
     userContext.lastActive = now;
     userContext.lastInput = inputText;
     userContext.lastProcessTime = now;
@@ -1132,6 +1167,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         }
 
         this.sendImageFeedback(ctx);
+        self.markInFlight(userContext, inputText);
         threads.start(function () {
             try {
                 var imagePrompt = self.getImageInstructionText(requestText);
@@ -1162,6 +1198,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             } catch (e) {
                 console.error("Async OpenAI Image Error: " + e);
                 if (callback) callback(ctx, { type: "text", content: "生成图片失败: " + e });
+            } finally {
+                self.clearInFlight(userContext, inputText);
             }
         });
 
@@ -1187,6 +1225,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         }
 
         console.log("[OpenAI] Starting vision thread for: " + visionHistoryText.substring(0, 20) + "...");
+        self.markInFlight(userContext, inputText);
         threads.start(function () {
             try {
                 var reply = self.callVisionOpenAI(userContext.history, visionPrompt, visionImagePath);
@@ -1202,6 +1241,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             } catch (e) {
                 console.error("Async OpenAI Vision Error: " + e);
                 if (callback) callback(ctx, { type: "text", content: "读图失败: " + e });
+            } finally {
+                self.clearInFlight(userContext, inputText);
             }
         });
 
@@ -1216,6 +1257,7 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     userContext.history.push({ role: "user", content: modelInputText });
 
     console.log("[OpenAI] Starting API thread for: " + modelInputText.substring(0, 20) + "...");
+    self.markInFlight(userContext, inputText);
     threads.start(function () {
         try {
             var reply = self.callOpenAI(userContext.history);
@@ -1227,6 +1269,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             }
         } catch (e) {
             console.error("Async OpenAI Error: " + e);
+        } finally {
+            self.clearInFlight(userContext, inputText);
         }
 
         userContext.history.pop();

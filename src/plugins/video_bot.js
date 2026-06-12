@@ -40,6 +40,135 @@ VideoBot.prototype.scanMediaFile = function (path) {
 };
 
 VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
+    // === okhttp 真流式下载：直接用 okhttp 的 byteStream 边读边写盘，绕开 AutoJS6
+    //     http.get 可能的整体缓冲，内存恒定(~8KB)，避免大视频一次性进内存导致 OOM。===
+    var maxAttempts = 3;
+    var retryDelays = [0, 1000, 2000];
+    var timeout = 180000;
+    var tempPath = savePath + ".part";
+    var finalFile = new java.io.File(savePath);
+    var tempFile = new java.io.File(tempPath);
+    var lastError = "视频下载失败，请稍后重试";
+
+    files.ensureDir("/sdcard/DCIM/Camera/");
+
+    importClass(okhttp3.OkHttpClient);
+    importClass(okhttp3.Request);
+    importClass(java.util.concurrent.TimeUnit);
+
+    var client = new OkHttpClient.Builder()
+        .connectTimeout(timeout, TimeUnit.MILLISECONDS)
+        .readTimeout(timeout, TimeUnit.MILLISECONDS)
+        .writeTimeout(timeout, TimeUnit.MILLISECONDS)
+        .build();
+
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (retryDelays[attempt - 1] > 0) {
+            sleep(retryDelays[attempt - 1]);
+        }
+
+        this.cleanupFile(tempPath);
+        this.cleanupFile(savePath);
+
+        var response = null;
+        var body = null;
+        var input = null;
+        var output = null;
+        var success = false;
+
+        try {
+            console.log("[VideoBot] (okhttp) Download attempt " + attempt + "/" + maxAttempts + ": " + realUrl);
+
+            var request = new Request.Builder().url(realUrl).build();
+            response = client.newCall(request).execute();
+
+            var code = response.code();
+            if (code !== 200) {
+                lastError = "视频下载失败: " + code;
+                console.error("[VideoBot] Download failed: " + code);
+                if (!this.shouldRetryDownloadStatus(code)) {
+                    return { path: null, error: lastError };
+                }
+                continue;
+            }
+
+            body = response.body();
+            if (!body) {
+                throw new java.io.IOException("empty response body");
+            }
+
+            var expectedLength = -1;
+            try {
+                expectedLength = body.contentLength();
+            } catch (e) {
+            }
+
+            // 真流式：byteStream() 不会把整段视频读进内存
+            input = new java.io.BufferedInputStream(body.byteStream());
+            output = new java.io.BufferedOutputStream(new java.io.FileOutputStream(tempFile));
+
+            var buffer = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 8192);
+            var bytesRead = 0;
+            var totalBytes = 0;
+
+            while ((bytesRead = input.read(buffer)) !== -1) {
+                if (bytesRead > 0) {
+                    output.write(buffer, 0, bytesRead);
+                    totalBytes += bytesRead;
+                }
+            }
+            output.flush();
+
+            this.safeClose(output);
+            output = null;
+            this.safeClose(input);
+            input = null;
+            this.safeClose(body);
+            body = null;
+            this.safeClose(response);
+            response = null;
+
+            var actualLength = tempFile.length();
+            if (totalBytes <= 0 || actualLength <= 0) {
+                throw new java.io.IOException("downloaded empty file");
+            }
+            if (expectedLength > 0 && actualLength !== expectedLength) {
+                throw new java.io.IOException("downloaded size mismatch: expected=" + expectedLength + ", actual=" + actualLength);
+            }
+
+            this.cleanupFile(savePath);
+            if (!tempFile.renameTo(finalFile)) {
+                throw new java.io.IOException("rename temp file failed");
+            }
+
+            success = true;
+            console.log("[VideoBot] Download Complete (okhttp), size=" + actualLength + " expected=" + expectedLength);
+            return { path: savePath, error: null };
+        } catch (e) {
+            lastError = "视频下载失败，请稍后重试";
+            console.error("[VideoBot] Download attempt " + attempt + " failed: " + e);
+        } finally {
+            this.safeClose(output);
+            this.safeClose(input);
+            this.safeClose(body);
+            this.safeClose(response);
+
+            if (!success) {
+                this.cleanupFile(tempPath);
+                this.cleanupFile(savePath);
+            }
+        }
+    }
+
+    return { path: null, error: lastError };
+};
+
+/*
+ * [旧版·已注释保留] 基于 AutoJS6 http.get 的下载实现。
+ * 隐患：http.get 可能整体缓冲响应体，且 body.bytes() 兜底会把整段视频一次性读入内存，
+ *       大视频(实测 ~323MB)直接 OOM。先用上面的 okhttp 版测试，确认稳定后再删除本块。
+ *
+VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
     var maxAttempts = 3;
     var retryDelays = [0, 1000, 2000];
     var timeout = 180000;
@@ -162,6 +291,7 @@ VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
 
     return { path: null, error: lastError };
 };
+*/
 
 VideoBot.prototype.handleAsync = function (ctx, callback) {
     if (!ctx.text) return false;

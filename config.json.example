@@ -15,6 +15,13 @@
 
   "asyncMode": true,
 
+  "voice": {
+    "enabled": true
+  },
+
+  "deferWhenUserActive": true,
+  "sendMaxHoldSeconds": 90,
+
   "plugins": {
     "openai": {
       "enabled": true,
@@ -127,6 +134,24 @@
           },
           "dedupe": {
             "keyPath": "data.version"
+          }
+        },
+        {
+          "name": "telegram_channel_stream",
+          "enabled": false,
+          "target": {
+            "sessionName": ["频道转发群", "东海龙宫"],
+            "isPrivate": false
+          },
+          "schedule": {
+            "type": "stream",
+            "longPollSeconds": 25,
+            "reconnectDelayMs": 3000,
+            "cursorFile": "/sdcard/VXBot/push_cursor_telegram.json"
+          },
+          "request": {
+            "url": "http://192.168.1.100:8092/pull",
+            "headers": {}
           }
         }
       ]

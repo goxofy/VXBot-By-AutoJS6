@@ -3,12 +3,12 @@
 //   message.template = "【天气】{{city}}\n{{summary}}\n温度：{{temp}}°C"
 //
 // 启动: node plugin_api_demo/text_api.js
-// 访问: http://<本机IP>:8090/weather
+// 访问: http://<本机IP>:8091/weather
 // dedupe key 取当前“分钟”，同一分钟内多次轮询会被去重，跨分钟才推送
 
 const http = require("http");
 
-const PORT = process.env.PORT || 8090;
+const PORT = process.env.PORT || 8091;
 
 const SUMMARIES = ["晴", "多云转晴", "小雨转多云", "阴", "雷阵雨"];
 

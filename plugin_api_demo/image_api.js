@@ -3,12 +3,12 @@
 //   dedupe.keyPath=data.version
 //
 // 启动: node plugin_api_demo/image_api.js
-// 访问: http://<本机IP>:8091/banner
+// 访问: http://<本机IP>:8092/banner
 // 返回一个公网图片 URL；version 取当前“分钟”，同分钟去重，跨分钟换图
 
 const http = require("http");
 
-const PORT = process.env.PORT || 8091;
+const PORT = process.env.PORT || 8092;
 
 http.createServer((req, res) => {
   if (!req.url.startsWith("/banner")) {
@@ -26,7 +26,8 @@ http.createServer((req, res) => {
     data: {
       title: "每分钟一张随机图",
       // image_url: "https://picsum.photos/seed/" + seed + "/1440/2560",
-      image_url: "https://strength-draws-detailed-typically.trycloudflare.com/eink.png?w=430&h=530",
+      // image_url: "https://strength-draws-detailed-typically.trycloudflare.com/eink.png?w=430&h=530",
+      image_url: "https://moyu.110x.de/eink.png?w=430&h=530",
       version: version
     }
   };

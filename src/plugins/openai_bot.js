@@ -98,6 +98,7 @@ function OpenAIBot(config) {
     this.config.visionModel = this.config.visionModel || this.config.model;
 
     this.contexts = {};
+    this.stateLock = threads.lock();
 }
 
 OpenAIBot.prototype.buildHeaders = function (options) {
@@ -168,6 +169,10 @@ OpenAIBot.prototype.callChatCompletion = function (messages, model, options) {
     if (sseReply && sseReply.trim()) {
         console.log("[OpenAI] Received SSE reply");
         return sseReply.trim();
+    }
+    if (rawBody && rawBody.indexOf("data:") !== -1) {
+        console.error("[OpenAI] SSE response contained no extractable text: " + rawBody.substring(0, 200));
+        return null;
     }
 
     var plainTextReply = (rawBody || "").trim();
@@ -554,15 +559,32 @@ OpenAIBot.prototype.normalizeIncomingMessage = function (ctx) {
         quote: quote,
         hasImage: ctx.hasImage === true,
         imageKind: ctx.imageKind || null,
-        captureImage: ctx.captureImage || null
+        captureImage: ctx.captureImage || null,
+        card: ctx.card || null
     };
 };
 
-OpenAIBot.prototype.buildModelInputText = function (input) {
+OpenAIBot.prototype.buildModelInputText = function (input, captureCardUrl) {
     if (!input) return "";
 
     var text = input.text || "";
     var quote = input.quote;
+    if (captureCardUrl && quote && quote.type === "text" && quote.card && quote.card.captureUrl) {
+        var url = null;
+        try {
+            url = quote.card.captureUrl();
+        } catch (e) {
+            console.error("[OpenAI] Capture quoted card url failed: " + e);
+        }
+
+        if (url && /^https?:\/\//.test(url)) {
+            console.log("[OpenAI] Using quoted card url: " + url.substring(0, 80));
+            return text ? (text + "\n" + url) : url;
+        }
+
+        console.warn("[OpenAI] Quoted card url unavailable, fallback to quoted title");
+    }
+
     if (quote && quote.type === "text" && quote.text) {
         if (text && text !== quote.text) {
             var suffix = quote.sender ? (" - " + quote.sender) : "";
@@ -929,16 +951,21 @@ OpenAIBot.prototype.callImageAPI = function (prompt, imagePath) {
 };
 
 OpenAIBot.prototype.sendImageFeedback = function (ctx) {
-    if (!ctx.vchat || !ctx.vchat.isChat()) return;
+    if (!ctx.vchat || !ctx.vchat.isChat()) return false;
 
     var originalMsg = ctx.text.length > 30 ? ctx.text.substring(0, 30) + "..." : ctx.text;
     var feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在生成图片，请稍候...";
+    var sent;
 
     if (!ctx.isPrivate && ctx.user) {
-        ctx.vchat.sendAtText(ctx.user, feedbackText);
+        sent = ctx.vchat.sendAtText(ctx.user, feedbackText);
     } else {
-        ctx.vchat.sendText(feedbackText);
+        sent = ctx.vchat.sendText(feedbackText);
     }
+    if (sent && ctx.markSendSucceeded) {
+        ctx.markSendSucceeded("openai-image-feedback");
+    }
+    return !!sent;
 };
 
 OpenAIBot.prototype.handle = function (ctx) {
@@ -994,11 +1021,15 @@ OpenAIBot.prototype.handle = function (ctx) {
     try {
         var responseText = this.callOpenAI(userContext.history);
         if (responseText) {
+            var sent;
             if (ctx.user && ctx.sender !== ctx.user) {
                 console.log("[Sync] Sending Native @ Mention to: " + ctx.user);
-                ctx.vchat.sendAtText(ctx.user, responseText);
+                sent = ctx.vchat.sendAtText(ctx.user, responseText);
             } else {
-                ctx.vchat.sendText(responseText);
+                sent = ctx.vchat.sendText(responseText);
+            }
+            if (sent && ctx.markSendSucceeded) {
+                ctx.markSendSucceeded("openai-sync-text");
             }
 
             userContext.history.push({ role: "assistant", content: responseText });
@@ -1080,6 +1111,15 @@ OpenAIBot.prototype.clearFailed = function (userContext, key) {
     if (userContext.failedKeys) delete userContext.failedKeys[key];
 };
 
+OpenAIBot.prototype.getDedupeKey = function (ctx, input, contentKey) {
+    if (input && input.hasImage) {
+        if (ctx && ctx.dedupeKey) return ctx.dedupeKey;
+        console.warn("[OpenAI] Image message missing instance dedupe key, using content fallback");
+        return "image-fallback|" + contentKey;
+    }
+    return contentKey;
+};
+
 OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     var input = this.normalizeIncomingMessage(ctx);
     var text = input.text || "";
@@ -1101,27 +1141,35 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     var contextKey = ctx.user ? (sessionName + "_" + ctx.user) : sessionName;
 
     var now = new Date().getTime();
-    if (!this.contexts[contextKey]) {
-        this.contexts[contextKey] = {
-            history: [{ role: "system", content: this.config.systemPrompt }],
-            lastActive: now,
-            lastInput: "",
-            lastProcessTime: 0,
-            repliedKeys: {},
-            inFlight: {},
-            failedKeys: {}
-        };
-    }
-    var userContext = this.contexts[contextKey];
+    var userContext;
+    this.stateLock.lock();
+    try {
+        if (!this.contexts[contextKey]) {
+            this.contexts[contextKey] = {
+                history: [{ role: "system", content: this.config.systemPrompt }],
+                lastActive: now,
+                lastInput: "",
+                lastDedupeKey: "",
+                lastProcessTime: 0,
+                repliedKeys: {},
+                inFlight: {},
+                failedKeys: {}
+            };
+        }
+        userContext = this.contexts[contextKey];
 
-    if (now - userContext.lastActive > this.config.contextTimeout) {
-        userContext.history = [{ role: "system", content: this.config.systemPrompt }];
-        userContext.lastActive = now;
-        userContext.lastInput = "";
-        userContext.lastProcessTime = 0;
-        userContext.repliedKeys = {};
-        userContext.inFlight = {};
-        userContext.failedKeys = {};
+        if (now - userContext.lastActive > this.config.contextTimeout) {
+            userContext.history = [{ role: "system", content: this.config.systemPrompt }];
+            userContext.lastActive = now;
+            userContext.lastInput = "";
+            userContext.lastDedupeKey = "";
+            userContext.lastProcessTime = 0;
+            userContext.repliedKeys = {};
+            userContext.inFlight = {};
+            userContext.failedKeys = {};
+        }
+    } finally {
+        this.stateLock.unlock();
     }
 
     var self = this;
@@ -1137,42 +1185,52 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         return false;
     }
 
-    // 去重键用"内容"，不掺屏幕位置(ctx.messageKey 含滚动位置)。
-    // 否则同一条老消息重新进群时位置变了，会被当成新消息反复处理(如引用图片反复读图)。
+    // 模型内容与去重身份分离：文字仍按内容去重；图片按 Bot 分配的消息实例 key 去重。
+    // 实例 key 不含屏幕坐标，滚动后仍能识别同一入站段里的同一张图片消息。
     if (useVision) {
         inputText = visionHistoryText || "[图片]";
     } else if (input.hasImage) {
         inputText = modelInputText || "[图片请求]";
     }
+    var dedupeKey = this.getDedupeKey(ctx, input, inputText);
+    var dedupeLabel = input.hasImage ? dedupeKey.substring(0, 80) : inputText.substring(0, 20);
+    if (input.hasImage) {
+        console.log("[OpenAI] Image instance key: " + dedupeLabel);
+    }
 
     var PROCESS_WINDOW = 5 * 1000;
-    if (inputText === userContext.lastInput &&
-        (now - userContext.lastProcessTime) < PROCESS_WINDOW) {
-        console.log("[OpenAI] Dedupe: Same message being processed within 5s");
-        return false;
-    }
+    this.stateLock.lock();
+    try {
+        if (dedupeKey === userContext.lastDedupeKey &&
+            (now - userContext.lastProcessTime) < PROCESS_WINDOW) {
+            console.log("[OpenAI] Dedupe: Same message being processed within 5s");
+            return false;
+        }
 
-    if (this.hasRepliedRecently(userContext, inputText, now)) {
-        console.log("[OpenAI] Dedupe: Already replied to '" + inputText.substring(0, 20) + "...' (in window)");
-        return false;
-    }
+        if (this.hasRepliedRecently(userContext, dedupeKey, now)) {
+            console.log("[OpenAI] Dedupe: Already replied to '" + dedupeLabel + "...' (in window)");
+            return false;
+        }
 
-    // 关键去重：同一条消息已有异步请求在途(尚未回复)时直接丢弃。
-    // 防止慢请求(读图 ~2min、文字 ~20s)在回复落地前被每轮轮询反复重派 → 重复读图/重复回复。
-    if (this.isInFlight(userContext, inputText, now)) {
-        console.log("[OpenAI] Dedupe: request already in-flight for '" + inputText.substring(0, 20) + "...'");
-        return false;
-    }
+        // 检查与占用必须原子化，避免轮询线程和通知线程同时接收同一条消息。
+        if (this.isInFlight(userContext, dedupeKey, now)) {
+            console.log("[OpenAI] Dedupe: request already in-flight for '" + dedupeLabel + "...'");
+            return false;
+        }
 
-    // 失败冷却：上游刚失败过的同一条消息，冷却期内不重派(也就不重发提示)，冷却后自动重试。
-    if (this.isInFailureCooldown(userContext, inputText, now)) {
-        console.log("[OpenAI] Skip: in failure cooldown for '" + inputText.substring(0, 20) + "...'");
-        return false;
-    }
+        if (this.isInFailureCooldown(userContext, dedupeKey, now)) {
+            console.log("[OpenAI] Skip: in failure cooldown for '" + dedupeLabel + "...'");
+            return false;
+        }
 
-    userContext.lastActive = now;
-    userContext.lastInput = inputText;
-    userContext.lastProcessTime = now;
+        userContext.lastActive = now;
+        userContext.lastInput = inputText;
+        userContext.lastDedupeKey = dedupeKey;
+        userContext.lastProcessTime = now;
+        this.markInFlight(userContext, dedupeKey);
+    } finally {
+        this.stateLock.unlock();
+    }
 
     if (isImageRequest) {
         console.log("[OpenAI] Detected image request");
@@ -1182,6 +1240,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         if (input.quote && input.quote.type === "image") {
             var instructionText = this.getImageInstructionText(requestText);
             if (!instructionText) {
+                self.markReplied(userContext, dedupeKey);
+                self.clearInFlight(userContext, dedupeKey);
                 if (callback) callback(ctx, { type: "text", content: "请在引用图片时补充修改要求" });
                 return true;
             }
@@ -1189,6 +1249,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
             if (this.config.imageEditEnabled) {
                 sourceImagePath = this.resolveQuotedImagePath(input.quote);
                 if (!sourceImagePath) {
+                    self.markFailed(userContext, dedupeKey);
+                    self.clearInFlight(userContext, dedupeKey);
                     if (callback) callback(ctx, { type: "text", content: "读取引用图片失败，请重试" });
                     return true;
                 }
@@ -1199,11 +1261,11 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         }
 
         this.sendImageFeedback(ctx);
-        self.markInFlight(userContext, inputText);
         threads.start(function () {
             try {
                 var imagePrompt = self.getImageInstructionText(requestText);
                 if (!imagePrompt) {
+                    self.markReplied(userContext, dedupeKey);
                     if (callback) callback(ctx, { type: "text", content: "请补充图片描述" });
                     return;
                 }
@@ -1218,20 +1280,23 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
                 console.log("[OpenAI] Image prompt: " + imagePrompt.substring(0, 80));
                 var localPath = useImageEdit ? self.callImageEditAPI(imagePrompt, sourceImagePath) : self.callImageAPI(imagePrompt);
                 if (localPath) {
-                    self.markReplied(userContext, inputText);
+                    self.markReplied(userContext, dedupeKey);
+                    self.clearFailed(userContext, dedupeKey);
                     if (callback) callback(ctx, {
                         type: "image",
                         path: localPath,
                         text: imagePrompt
                     });
                 } else {
+                    self.markFailed(userContext, dedupeKey);
                     if (callback) callback(ctx, { type: "text", content: "生成图片失败" });
                 }
             } catch (e) {
                 console.error("Async OpenAI Image Error: " + e);
+                self.markFailed(userContext, dedupeKey);
                 if (callback) callback(ctx, { type: "text", content: "生成图片失败: " + e });
             } finally {
-                self.clearInFlight(userContext, inputText);
+                self.clearInFlight(userContext, dedupeKey);
             }
         });
 
@@ -1240,6 +1305,8 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
 
     if (useVision) {
         if (!visionPrompt) {
+            self.markReplied(userContext, dedupeKey);
+            self.clearInFlight(userContext, dedupeKey);
             if (callback) callback(ctx, { type: "text", content: "请在引用图片时补充问题或要求" });
             return true;
         }
@@ -1252,29 +1319,33 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
         }
 
         if (!visionImagePath) {
+            self.markFailed(userContext, dedupeKey);
+            self.clearInFlight(userContext, dedupeKey);
             if (callback) callback(ctx, { type: "text", content: "读取图片失败，请重试" });
             return true;
         }
 
         console.log("[OpenAI] Starting vision thread for: " + visionHistoryText.substring(0, 20) + "...");
-        self.markInFlight(userContext, inputText);
         threads.start(function () {
             try {
                 var reply = self.callVisionOpenAI(userContext.history, visionPrompt, visionImagePath);
                 if (reply) {
                     userContext.history.push({ role: "user", content: visionHistoryText });
                     userContext.history.push({ role: "assistant", content: reply });
-                    self.markReplied(userContext, inputText);
+                    self.markReplied(userContext, dedupeKey);
+                    self.clearFailed(userContext, dedupeKey);
                     if (callback) callback(ctx, reply);
                     return;
                 }
 
+                self.markFailed(userContext, dedupeKey);
                 if (callback) callback(ctx, { type: "text", content: "读图失败，请稍后重试" });
             } catch (e) {
                 console.error("Async OpenAI Vision Error: " + e);
+                self.markFailed(userContext, dedupeKey);
                 if (callback) callback(ctx, { type: "text", content: "读图失败: " + e });
             } finally {
-                self.clearInFlight(userContext, inputText);
+                self.clearInFlight(userContext, dedupeKey);
             }
         });
 
@@ -1282,36 +1353,39 @@ OpenAIBot.prototype.handleAsync = function (ctx, callback) {
     }
 
     if (input.hasImage && !modelInputText) {
+        this.clearInFlight(userContext, dedupeKey);
         console.log("[OpenAI] Ignore empty image message");
         return false;
     }
 
+    modelInputText = this.buildModelInputText(input, true);
+    console.log("[OpenAI] Model text: " + modelInputText.substring(0, 50));
+
     userContext.history.push({ role: "user", content: modelInputText });
 
     console.log("[OpenAI] Starting API thread for: " + modelInputText.substring(0, 20) + "...");
-    self.markInFlight(userContext, inputText);
     threads.start(function () {
         try {
             var reply = self.callOpenAI(userContext.history);
             if (reply) {
                 userContext.history.push({ role: "assistant", content: reply });
-                self.markReplied(userContext, inputText);
-                self.clearFailed(userContext, inputText);
+                self.markReplied(userContext, dedupeKey);
+                self.clearFailed(userContext, dedupeKey);
                 if (callback) callback(ctx, reply);
                 return;
             }
             // 请求失败(上游 503 / 鉴权失败 / 空响应)：撤回刚入队的 user 消息，给用户一句提示，
             // 不再无声丢弃；记失败冷却，避免轮询每隔十几秒重试刷屏，冷却后自动重试。
             userContext.history.pop();
-            self.markFailed(userContext, inputText);
+            self.markFailed(userContext, dedupeKey);
             if (callback) callback(ctx, { type: "text", content: "AI 服务暂时不可用，请稍后再试" });
         } catch (e) {
             console.error("Async OpenAI Error: " + e);
             userContext.history.pop();
-            self.markFailed(userContext, inputText);
+            self.markFailed(userContext, dedupeKey);
             if (callback) callback(ctx, { type: "text", content: "AI 服务出错，请稍后再试" });
         } finally {
-            self.clearInFlight(userContext, inputText);
+            self.clearInFlight(userContext, dedupeKey);
         }
     });
 

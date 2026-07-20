@@ -5,6 +5,10 @@ function normalizeSessionName(name) {
     return (name || "").replace(/\(\d+\)$/, "").trim();
 }
 
+function normalizeDedupeText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+}
+
 function isWhitelistedSession(sessionName, whitelist) {
     if (!whitelist || whitelist.length === 0) return true;
 
@@ -60,6 +64,7 @@ function Bot() {
     this.plugins = [];
     this.sendQueue = []; // [New] Queue for outgoing messages
     this.uiLock = false; // [New] Global UI Lock
+    this.sessionDedupeStates = {};
 }
 
 Bot.prototype.register = function (plugin) {
@@ -74,9 +79,16 @@ Bot.prototype.start = function (config) {
     this.mentionString = config.mentionString || ""; // [Fix] Assign mentionString from config!
     this.sendQueue = [];
     this.uiLock = false;
-    // [Thread Safety] Lock for queue operations to prevent data corruption between threads
+    this.sessionDedupeStates = {};
+    // [Thread Safety] Locks for shared state accessed by polling/plugin/sender threads
     this.queueLock = threads.lock();
+    this.generationLock = threads.lock();
     this.asyncMode = config.asyncMode === undefined ? true : config.asyncMode; // Default to True default (Async)
+    this.voiceEnabled = config.voiceEnabled !== false; // 语音转文字，默认开启
+    // [Defer] 用户正在使用手机时暂缓发送，避免抢屏幕；有最大保持时长上限，避免饿死
+    this.deferWhenUserActive = config.deferWhenUserActive === true;
+    this.sendMaxHoldMs = (config.sendMaxHoldSeconds || 90) * 1000;
+    this._sendHoldSince = 0;
 
     this.uiLock = false;
     var self = this;
@@ -217,24 +229,164 @@ Bot.prototype.start = function (config) {
     setInterval(function () { }, 10000);
 };
 
+Bot.prototype.getSessionDedupeState = function (sessionName) {
+    var key = normalizeSessionName(sessionName);
+    if (!this.sessionDedupeStates[key]) {
+        this.sessionDedupeStates[key] = {
+            generation: 0,
+            pendingSend: false,
+            lastBoundaryKey: "",
+            nextImageId: 1,
+            lastImageSnapshot: []
+        };
+    }
+    return this.sessionDedupeStates[key];
+};
+
+Bot.prototype.markSessionSendSucceeded = function (sessionName, sendType) {
+    var key = normalizeSessionName(sessionName);
+    if (!key) return;
+
+    if (this.generationLock) this.generationLock.lock();
+    try {
+        var state = this.getSessionDedupeState(key);
+        state.pendingSend = true;
+    } finally {
+        if (this.generationLock) this.generationLock.unlock();
+    }
+
+    console.log("[Dedupe] Waiting for new self boundary after " + (sendType || "send") + ": " + key);
+};
+
+Bot.prototype.observeSessionBoundary = function (sessionName, boundaryKey) {
+    var key = normalizeSessionName(sessionName);
+    if (!key || !boundaryKey) return;
+
+    var advanced = false;
+    var generation = 0;
+    if (this.generationLock) this.generationLock.lock();
+    try {
+        var state = this.getSessionDedupeState(key);
+        if (state.lastBoundaryKey !== boundaryKey) {
+            state.lastBoundaryKey = boundaryKey;
+            if (state.pendingSend) {
+                state.generation += 1;
+                state.pendingSend = false;
+                state.nextImageId = 1;
+                state.lastImageSnapshot = [];
+                advanced = true;
+            }
+        }
+        generation = state.generation;
+    } finally {
+        if (this.generationLock) this.generationLock.unlock();
+    }
+
+    if (advanced) {
+        console.log("[Dedupe] Observed new self boundary, generation advanced: " + key + " -> " + generation);
+    }
+};
+
+Bot.prototype.buildImageStructuralSignature = function (msg) {
+    msg = msg || {};
+    var quote = msg.quote || null;
+    return JSON.stringify([
+        normalizeDedupeText(msg.sender),
+        msg.imageKind || "unknown",
+        normalizeDedupeText(msg.mainText || msg.text),
+        normalizeDedupeText(msg.rawText),
+        quote ? (quote.type || "") : "",
+        quote ? normalizeDedupeText(quote.sender) : "",
+        quote ? normalizeDedupeText(quote.text) : ""
+    ]);
+};
+
+Bot.prototype.assignInboundDedupeKeys = function (sessionName, msgs) {
+    var normalizedSession = normalizeSessionName(sessionName);
+    var occurrences = {};
+
+    if (this.generationLock) this.generationLock.lock();
+    try {
+        var state = this.getSessionDedupeState(normalizedSession);
+        var previous = state.lastImageSnapshot || [];
+        var usedPrevious = {};
+        var current = [];
+
+        for (var i = 0; i < msgs.length; i++) {
+            var msg = msgs[i];
+            if (!msg || msg.hasImage !== true) continue;
+
+            var signature = this.buildImageStructuralSignature(msg);
+            var occurrence = (occurrences[signature] || 0) + 1;
+            occurrences[signature] = occurrence;
+            var nodeKey = String(msg.nodeKey || "");
+            var imageId = 0;
+
+            // 优先用相邻两次扫描中的同一无障碍节点对齐；节点重建时再按结构+出现序号对齐。
+            for (var pi = 0; pi < previous.length; pi++) {
+                if (usedPrevious[pi]) continue;
+                var old = previous[pi];
+                if (nodeKey && old.nodeKey === nodeKey && old.signature === signature) {
+                    imageId = old.imageId;
+                    usedPrevious[pi] = true;
+                    break;
+                }
+            }
+            if (!imageId) {
+                for (var fi = 0; fi < previous.length; fi++) {
+                    if (usedPrevious[fi]) continue;
+                    var fallback = previous[fi];
+                    if (fallback.signature === signature && fallback.occurrence === occurrence) {
+                        imageId = fallback.imageId;
+                        usedPrevious[fi] = true;
+                        break;
+                    }
+                }
+            }
+            if (!imageId) {
+                imageId = state.nextImageId++;
+            }
+
+            current.push({
+                nodeKey: nodeKey,
+                signature: signature,
+                occurrence: occurrence,
+                imageId: imageId
+            });
+            msg.dedupeKey = "image|" + encodeURIComponent(normalizedSession) +
+                "|g=" + state.generation +
+                "|id=" + imageId;
+        }
+
+        state.lastImageSnapshot = current;
+    } finally {
+        if (this.generationLock) this.generationLock.unlock();
+    }
+};
+
 /**
  * Read messages and dispatch to Async Plugins
  */
 Bot.prototype.readAndDispatch = function (title, isAtMe) {
     if (!vchat.isChat()) return;
 
-    var normalizedTitle = normalizeSessionName(title);
+    var rawTitle = String(title || "").trim();
+    var normalizedTitle = normalizeSessionName(rawTitle);
+    var isGroupChat = /\(\d+\)$/.test(rawTitle) || vchat.isGroupChat();
 
     // Retry Loop for loading
     var msgs = [];
     for (var t = 0; t < 5; t++) {
-        msgs = vchat.getRecentMessages();
+        msgs = vchat.getRecentMessages(isGroupChat);
         if (msgs && msgs.length > 0) break;
         sleep(500);
     }
 
+    this.observeSessionBoundary(normalizedTitle, msgs && msgs.selfBoundaryKey);
     if (!msgs || msgs.length === 0) return;
 
+    this.assignInboundDedupeKeys(normalizedTitle, msgs);
+    var self = this;
     var latestMsg = msgs[msgs.length - 1];
     var isPrivateChat = (normalizedTitle === latestMsg.sender || normalizedTitle.indexOf(latestMsg.sender) > -1 || latestMsg.sender.indexOf(normalizedTitle) > -1);
 
@@ -291,9 +443,23 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 cleanText = cleanText.replace(re, "").trim();
             }
 
-            if ((!cleanText || cleanText.length === 0) && !msg.hasImage && !msg.card) continue;
+            if ((!cleanText || cleanText.length === 0) && !msg.hasImage && !msg.card && !msg.voice) continue;
 
-            var displayText = cleanText || (msg.card ? "[公众号卡片]" : "[图片]");
+            // 语音消息：还没有文本(未转写)时，触发微信"转文字"拿转写文本，当普通文字处理
+            if (msg.voice && (!cleanText || cleanText.length === 0)) {
+                if (!this.voiceEnabled) continue;
+                var transcript = msg.voice.transcript || msg.voice.captureText();
+                transcript = (transcript || "").trim();
+                if (!transcript) {
+                    console.log(">> Voice message: empty transcript, skip");
+                    continue;
+                }
+                cleanText = transcript;
+                rawText = transcript;
+                mainText = transcript;
+            }
+
+            var displayText = cleanText || (msg.card ? "[公众号卡片]" : (msg.voice ? "[语音]" : "[图片]"));
             console.log(">> Dispatching [" + senderName + "] Msg " + (mi + 1) + ": [" + displayText.substring(0, 50) + "...]");
 
             var context = {
@@ -307,7 +473,12 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 imageKind: msg.imageKind || null,
                 captureImage: msg.captureImage || null,
                 card: msg.card || null,
+                voice: msg.voice || null,
+                dedupeKey: msg.dedupeKey || null,
                 messageKey: senderName + ":" + msg.rect.top + ":" + msg.rect.bottom + ":" + (displayText || "[图片]"),
+                markSendSucceeded: function (sendType) {
+                    self.markSessionSendSucceeded(normalizedTitle, sendType);
+                },
                 sender: title,
                 user: senderName,
                 isPrivate: isPrivateChat,
@@ -316,7 +487,6 @@ Bot.prototype.readAndDispatch = function (title, isAtMe) {
                 vchat: vchat
             };
 
-            var self = this;
             // Dispatch to plugins - first accepting plugin wins FOR THIS MESSAGE
             for (var j = 0; j < this.plugins.length; j++) {
                 var plugin = this.plugins[j];
@@ -368,8 +538,29 @@ Bot.prototype.enqueueReply = function (ctx, replyText) {
 /**
  * Process Send Queue (Consumer)
  */
+Bot.prototype.isUserActive = function () {
+    // 简单稳健的代理信号：屏幕亮即视为用户可能在用手机
+    try {
+        return typeof device !== 'undefined' && device.isScreenOn && device.isScreenOn();
+    } catch (e) {
+        return false;
+    }
+};
+
 Bot.prototype.processSendQueue = function () {
     if (this.uiLock) return; // Wait for UI available
+
+    // [Defer] 用户活跃(屏幕亮)且有待发消息时暂缓发送；超过最大保持时长则强制发送，避免饿死
+    if (this.deferWhenUserActive && this.sendQueue.length > 0) {
+        if (this.isUserActive()) {
+            var nowTs = new Date().getTime();
+            if (!this._sendHoldSince) this._sendHoldSince = nowTs;
+            if (nowTs - this._sendHoldSince < this.sendMaxHoldMs) return;
+            console.warn("[Defer] 已达最大保持时长，忽略用户活跃强制发送");
+        } else {
+            this._sendHoldSince = 0;
+        }
+    }
 
     var taskItem = null;
 
@@ -424,6 +615,7 @@ Bot.prototype.processSendQueue = function () {
             if (!success) {
                 console.error("Failed to share video to: " + cleanSessionName);
             } else {
+                this.markSessionSendSucceeded(cleanSessionName, "video");
                 // [Cleanup] Delete video file after sending, similar to ImageBot
                 var fileToDelete = replyData.path;
                 threads.start(function () {
@@ -445,6 +637,7 @@ Bot.prototype.processSendQueue = function () {
             if (!success) {
                 console.error("Failed to share image to: " + cleanSessionName);
             } else {
+                this.markSessionSendSucceeded(cleanSessionName, "image");
                 // Cleanup after sending
                 var fileToDelete = replyData.path;
                 threads.start(function () {
@@ -520,11 +713,17 @@ Bot.prototype.processSendQueue = function () {
                 finalText = rePrefix + "\n------------------------------\n" + finalText;
             }
 
+            var sendSuccess;
             if (!task.isPrivate && task.user) {
                 console.log("Sending Native @ Mention to: " + task.user);
-                vchat.sendAtText(task.user, finalText);
+                sendSuccess = vchat.sendAtText(task.user, finalText);
             } else {
-                vchat.sendText(finalText);
+                sendSuccess = vchat.sendText(finalText);
+            }
+            if (sendSuccess) {
+                this.markSessionSendSucceeded(cleanSessionName, "text");
+            } else {
+                console.error("Failed to send text to: " + cleanSessionName);
             }
 
             // [Fix] Recheck for new messages after sending feedback

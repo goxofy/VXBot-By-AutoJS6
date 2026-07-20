@@ -212,12 +212,16 @@ VideoBot.prototype.handleAsync = function (ctx, callback) {
         var originalMsg = ctx.text.length > 30 ? ctx.text.substring(0, 30) + "..." : ctx.text;
         var feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在下载视频请稍候...";
 
+        var feedbackSent;
         if (!ctx.isPrivate && ctx.user) {
-            ctx.vchat.sendAtText(ctx.user, feedbackText);
+            feedbackSent = ctx.vchat.sendAtText(ctx.user, feedbackText);
         } else {
-            ctx.vchat.sendText(feedbackText);
+            feedbackSent = ctx.vchat.sendText(feedbackText);
         }
-        console.log("[VideoBot] Sent sync feedback");
+        if (feedbackSent && ctx.markSendSucceeded) {
+            ctx.markSendSucceeded("video-feedback");
+        }
+        console.log("[VideoBot] Sent sync feedback: " + (!!feedbackSent));
     }
 
     var self = this;

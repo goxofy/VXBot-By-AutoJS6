@@ -81,6 +81,9 @@ var MENTION_STRING = config.mentionString || "";
 // 异步模式
 var ASYNC_MODE = config.asyncMode !== false; // 默认开启
 
+var voiceConfig = config.voice || {};
+var VOICE_ENABLED = voiceConfig.enabled !== false; // 语音转文字(私聊),默认开启
+
 // 插件配置
 var pluginsConfig = config.plugins || {};
 
@@ -189,7 +192,10 @@ bot.start({
     interval: POLLING_INTERVAL,
     whitelist: WHITELIST,
     mentionString: MENTION_STRING,
-    asyncMode: ASYNC_MODE
+    asyncMode: ASYNC_MODE,
+    voiceEnabled: VOICE_ENABLED,
+    deferWhenUserActive: config.deferWhenUserActive === true,
+    sendMaxHoldSeconds: config.sendMaxHoldSeconds || 90
 });
 
 if (scheduledPushBot) {

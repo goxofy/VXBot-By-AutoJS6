@@ -70,12 +70,16 @@ ImageBot.prototype.handleAsync = function (ctx, callback) {
         var feedbackText = "Re: " + originalMsg + "\n------------------------------\n正在找图，请稍候...";
 
         // Use @mention for group chats
+        var feedbackSent;
         if (!ctx.isPrivate && ctx.user) {
-            ctx.vchat.sendAtText(ctx.user, feedbackText);
+            feedbackSent = ctx.vchat.sendAtText(ctx.user, feedbackText);
         } else {
-            ctx.vchat.sendText(feedbackText);
+            feedbackSent = ctx.vchat.sendText(feedbackText);
         }
-        console.log("[ImageBot] Sent sync feedback");
+        if (feedbackSent && ctx.markSendSucceeded) {
+            ctx.markSendSucceeded("image-feedback");
+        }
+        console.log("[ImageBot] Sent sync feedback: " + (!!feedbackSent));
     }
 
     var self = this;

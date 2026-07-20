@@ -15,7 +15,7 @@
 *   **🎬 VideoBot**: 支持各视频平台视频解析下载并分享
 *   **🖼 ImageBot**: 发送随机风景美图 (Picsum)
 *   **🤖 OpenAIBot**: 多轮对话、上下文记忆、智能引用处理；文生图 / 图改图 / 读图，且**读图可配独立后端模型**（文字用 grok、读图用 gpt-4o 之类互不影响）
-*   **⏰ ScheduledPushBot**: 定时拉取外部 API 数据并主动推送文本 / 图片
+*   **⏰ ScheduledPushBot**: 定时拉取外部 API 数据并主动推送文本 / 图片；支持 `stream` 长轮询实时转发 Telegram 频道
 *   **🔗 LinkSummaryBot**: 自动识别公众号文章卡片，取原文链接、抓正文并用 LLM 总结后发回（群聊无需 @）
 
 ### 智能特性
@@ -82,6 +82,9 @@ npm run demo
     "interval": 500
   },
   "asyncMode": true,
+  "voice": {
+    "enabled": true
+  },
   "plugins": {
     "openai": {
       "enabled": true,
@@ -194,6 +197,24 @@ npm run demo
           "dedupe": {
             "keyPath": "data.version"
           }
+        },
+        {
+          "name": "telegram_channel_stream",
+          "enabled": false,
+          "target": {
+            "sessionName": ["频道转发群", "东海龙宫"],
+            "isPrivate": false
+          },
+          "schedule": {
+            "type": "stream",
+            "longPollSeconds": 25,
+            "reconnectDelayMs": 3000,
+            "cursorFile": "/sdcard/VXBot/push_cursor_telegram.json"
+          },
+          "request": {
+            "url": "http://192.168.1.100:8093/pull",
+            "headers": {}
+          }
         }
       ]
     }
@@ -210,6 +231,7 @@ npm run demo
 | `polling.enabled` | `boolean` | 是否开启轮询扫描未读会话。 | `true` / `false`；默认 `true`。 |
 | `polling.interval` | `number` | 轮询间隔，单位毫秒。 | 默认 `500`；常用 `500`、`1000`、`2000`；越小越及时，但更耗资源。 |
 | `asyncMode` | `boolean` | 是否开启异步生产者-消费者模式。 | `true` / `false`；默认 `true`（建议保持）；`false` 为同步阻塞模式。 |
+| `voice.enabled` | `boolean` | 是否开启语音消息自动转文字(仅私聊)。检测到语音 → 长按调微信「转文字」→ 转写文本走普通文字流程(OpenAIBot 等)→ 文字回复。群聊语音因无法 @ 机器人故不处理。 | `true` / `false`；默认 `true`。依赖微信 8.0.39 UI，转文字菜单项/转写节点可能需按版本校准。 |
 
 ### `plugins.openai` 配置
 
@@ -306,9 +328,9 @@ npm run demo
 
 ### `plugins.scheduledPush` 配置
 
-`ScheduledPushBot` 用于**主动定时推送**：按计划拉取一个外部 API，解析 JSON，再把文本或图片发到指定私聊/群聊。
+`ScheduledPushBot` 用于**主动推送**：`daily` / `interval` 按计划拉取外部 API，解析 JSON 后推送文本或图片；`stream` 用独立长轮询线程实时拉取消息流，适合 Telegram 频道 → VX 群转发。
 
-> 注意：第一版只支持 **JSON API**、`GET/POST(JSON)`、**文本 / 图片** 两类推送；暂不支持 cron、视频、multipart、自定义 JS 表达式。
+> 注意：`daily` / `interval` 支持 **JSON API**、`GET/POST(JSON)`、**文本 / 图片** 两类推送；暂不支持 cron、multipart、自定义 JS 表达式。`stream` 的消息类型由服务端逐条返回，当前支持文本、图片、视频；图片 / 视频依赖手机可访问 `mediaUrl`。
 
 | 参数 | 类型 | 如何填写 | 可选值 / 默认行为 |
 | :--- | :--- | :--- | :--- |
@@ -323,13 +345,17 @@ npm run demo
 | :--- | :--- | :--- | :--- |
 | `name` | `string` | 任务唯一名称。 | 必填；建议全局唯一，便于日志排查；重名 job 会被跳过。 |
 | `enabled` | `boolean` | 是否启用该任务。 | `true` / `false`；默认 `true`（job 内不填也启用）。 |
-| `target.sessionName` | `string` | 目标会话名。 | 必填；建议与 VX 会话列表显示名称一致；缺失则该 job 被跳过。 |
+| `target.sessionName` | `string` / `string[]` | 目标会话名；stream 转发可填数组一次扇出到多个群。 | 必填；建议与 VX 会话列表显示名称一致；缺失则该 job 被跳过。 |
 | `target.isPrivate` | `boolean` | 标记目标是私聊还是群聊。 | `true` / `false`；默认 `false`；仅语义说明，发送仍按 `sessionName` 搜索会话。 |
-| `schedule.type` | `string` | 调度模式。 | `"daily"` / `"interval"`；非法值会被规范化为 `"interval"`。 |
+| `targets` | `object[]` | 可选，多目标高级写法，每项含 `sessionName` / `isPrivate`。 | 默认不填；适合同一 job 同时发私聊和群聊，或每个目标 `isPrivate` 不同。 |
+| `schedule.type` | `string` | 调度模式。 | `"daily"` / `"interval"` / `"stream"`；`stream` 为独立长轮询线程，不走 `tickSeconds`。 |
 | `schedule.time` | `string` | 每日固定时间。 | `daily` 模式必填，格式 `"HH:MM"`（24 小时制），例如 `"08:30"`。 |
 | `schedule.everyMinutes` | `number` | 间隔轮询分钟数。 | `interval` 模式必填，须 > 0，例如 `30`、`60`、`180`；非法时默认 `60`。 |
-| `request.method` | `string` | HTTP 请求方法。 | `"GET"` / `"POST"`；默认 `"GET"`。 |
-| `request.url` | `string` | 接口地址。 | 必填；应返回 JSON；缺失则该 job 被跳过。 |
+| `schedule.longPollSeconds` | `number` | stream 长轮询 hold 秒数。 | `stream` 模式使用；默认 `25`，服务端 demo 上限 `60`。 |
+| `schedule.reconnectDelayMs` | `number` | stream 请求失败后的重连等待，单位毫秒。 | 默认 `3000`。 |
+| `schedule.cursorFile` | `string` | stream 游标持久化文件。 | 默认 `/sdcard/VXBot/push_cursor_<job>.json`；用于避免重启 VXBot 后重复拉取旧消息。 |
+| `request.method` | `string` | HTTP 请求方法。 | `"GET"` / `"POST"`；默认 `"GET"`；`stream` demo 使用 `GET`。 |
+| `request.url` | `string` | 接口地址。 | 必填；`daily/interval` 应返回 JSON；`stream` 应指向 `/pull` 长轮询接口。 |
 | `request.headers` | `object` | 请求头。 | 默认 `{}`；常用于 `Authorization`、自定义鉴权。 |
 | `request.body` | `object` | POST 请求 JSON body。 | 默认 `{}`；仅 `POST` 模式使用；第一版只支持 JSON 对象。 |
 | `request.timeout` | `number` | 单个 job 的请求超时，单位毫秒。 | 默认回退到插件级 `requestTimeout`（`30000`）。 |
@@ -360,6 +386,56 @@ npm run demo
   }
 }
 ```
+
+### Telegram 频道实时转发 (`schedule.type="stream"`)
+
+仓库提供了一个服务端 demo：`plugin_api_demo/stream_api.js`。推荐把读取 Telegram、媒体下载直链拼接等网络相关逻辑放在电脑 / 服务器上，手机端只长轮询这个服务：
+
+```bash
+node plugin_api_demo/stream_api.js
+```
+
+默认监听：
+
+```text
+http://0.0.0.0:8093/pull
+```
+
+手机配置里的 `request.url` 必须填**手机能访问到的电脑 / 服务器局域网 IP**，不要填 `localhost` / `127.0.0.1`，例如：
+
+```json
+"request": {
+  "url": "http://192.168.1.100:8093/pull"
+}
+```
+
+服务端 demo 的 `/pull` 契约：
+
+```json
+{
+  "cursor": 123,
+  "messages": [
+    { "id": 124, "type": "text", "text": "【频道】正文" },
+    { "id": 125, "type": "image", "text": "说明文字", "mediaUrl": "http://.../image.jpg" }
+  ]
+}
+```
+
+运行机制与故障自愈：
+
+- 服务端 `stream_api.js` 的消息队列和队列 id 是**内存态**，Node 服务重启后 `lastId` 会从 0 重新开始。
+- 手机端会把游标持久化到 `schedule.cursorFile`，例如 `/sdcard/VXBot/push_cursor_telegram.json`。
+- 服务端已加入 **stale cursor 自愈**：如果手机请求的 `after` 大于当前服务端 `lastId`，说明服务端大概率重启过；服务端会返回当前 `lastId` 让手机游标自动回落，避免一直 `pending=0`、永远收不到新消息。
+- `after<=0` 表示“从现在开始订阅”，不会回灌已有内存队列，避免重启 VXBot 后刷历史。
+- 服务端会打印 `/pull` 访问日志，例如：`[pull] from=... after=267 timeout=25 lastId=2 pending=0`；看到 `after > lastId` 时会打印 stale cursor reset 日志。
+- 手动验证链路可用：`POST /push` 注入测试消息，例如 `curl -X POST http://<IP>:8093/push -H 'Content-Type: application/json' -d '{"type":"text","text":"【自测】stream push test"}'`。
+
+排查顺序：
+
+1. API 端看到 `[queue] +#...`：说明消息已进入服务端 `/pull` 队列。
+2. API 端看到 `[pull] from=...`：说明 AutoJS6 手机端确实在长轮询。
+3. 手机端看到 `[ScheduledPush] Stream <job>: forwarded ...`：说明手机已拉到消息并进入发送队列。
+4. 手机端看到 `Processing Send Task for: ...`：说明 VXBot 开始执行微信发送；若之后失败，多半是会话名、微信搜索 UI、媒体下载或分享 Intent 问题。
 
 ### `ScheduledPushBot` 使用建议
 

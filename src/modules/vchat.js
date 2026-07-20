@@ -19,6 +19,17 @@ function isTimestampText(text) {
     return /^\s*\d{1,2}:\d{2}\s*$/.test(text) || /^((凌晨|早晨|早上|上午|中午|下午|傍晚|晚上|深夜|半夜|昨天|今天|明天|周|星期).*?\d{1,2}:\d{2}|^\d{2,4}[年\.\/-]\d{1,2}[月\.\/-]\d{1,2})/.test(text)
 }
 
+function getUiNodeIdentity(node) {
+    if (!node) return ""
+    let hash = ""
+    let cls = ""
+    let resourceId = ""
+    try { hash = String(node.hashCode()) } catch (e) {}
+    try { cls = String(node.className() || "") } catch (e2) {}
+    try { resourceId = String(node.id() || "") } catch (e3) {}
+    return hash ? (hash + "|" + cls + "|" + resourceId) : ""
+}
+
 function isChatScreen() {
     return className("ImageButton").descContains("切换").exists()
 }
@@ -74,15 +85,13 @@ function extractQuoteMeta(quoteParts) {
     let joinedQuote = (quoteParts || []).join(" ").trim()
     let quoteSender = ""
     let quoteText = ""
-    let matched = joinedQuote.match(/^(.+?)[：:]\s*(.*)$/)
-    let looksLikeSplitQuote = quoteParts && quoteParts.length >= 2 && quoteParts[0].length > 0 && quoteParts[0].length <= 20
+    let matched = joinedQuote.match(/^(.+?)[：:]\s*(.+)$/)
 
+    // 只保留强信号：明确的“发送者: 内容”。
+    // 不再把“第二行/后续行”默认当成引用，避免普通多段文本被误判成 quote。
     if (matched) {
         quoteSender = matched[1].trim()
         quoteText = matched[2].trim()
-    } else if (looksLikeSplitQuote) {
-        quoteSender = quoteParts[0].trim()
-        quoteText = quoteParts.slice(1).join(" ").trim()
     }
 
     return {
@@ -90,6 +99,54 @@ function extractQuoteMeta(quoteParts) {
         text: quoteText,
         raw: joinedQuote
     }
+}
+
+function getMessageTextStartIndex(tvs, headDesc, isGroupChat, headRect) {
+    if (!tvs || tvs.size() <= 1) return 0
+
+    // 某些消息项会把“下午4:47”之类的时间标签放在群昵称前面。
+    // 先找前两个真正的内容节点，再判断第一个是否为群昵称。
+    let first = null
+    let firstIndex = -1
+    let second = null
+    for (let i = 0; i < tvs.size(); i++) {
+        let candidate = tvs.get(i)
+        if (!candidate) continue
+        let txt = String(candidate.text() || "").trim()
+        if (!txt) continue
+        if (isTimestampText(txt)) continue
+        if (candidate.bounds().height() <= 20) continue
+
+        if (!first) {
+            first = candidate
+            firstIndex = i
+        } else {
+            second = candidate
+            break
+        }
+    }
+    if (!first) return 0
+
+    let firstText = String(first.text() || "").trim()
+    if (headDesc && headDesc.indexOf(firstText) > -1) {
+        return firstIndex + 1
+    }
+
+    if (!isGroupChat || !second) return 0
+
+    let firstRect = first.bounds()
+    let secondRect = second.bounds()
+    let looksLikeGroupNickname = firstText.length <= 32
+        && firstRect.height() <= 60
+        && firstRect.bottom <= secondRect.top
+        && (!headRect || firstRect.top <= headRect.bottom + 40)
+
+    if (looksLikeGroupNickname) {
+        console.log(">> Filtered Group Nickname Label: [" + firstText + "]")
+        return firstIndex + 1
+    }
+
+    return 0
 }
 
 /**
@@ -252,7 +309,77 @@ function openCardAndCopyUrl(cardRect, cardTitle) {
     }
 }
 
-function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhoto) {
+/**
+ * 在语音气泡正下方一带寻找"转文字"结果文本节点。
+ * 启发式(需真机校准)：屏幕上 top 落在气泡下沿附近、非时长非时间戳的最长文本。
+ */
+function readVoiceTranscriptNear(voiceRect) {
+    if (!voiceRect) return ""
+    let tvs = className("TextView").find()
+    if (!tvs || !tvs.nonEmpty()) return ""
+    let best = ""
+    for (let i = 0; i < tvs.size(); i++) {
+        let t = tvs.get(i)
+        let txt = (t.text() || "").trim()
+        if (!txt) continue
+        if (/^\d+\s*(''|"|″|秒)$/.test(txt)) continue
+        if (isTimestampText(txt)) continue
+        let b = t.bounds()
+        // 落在气泡下方约 0~240px、横向有交叠
+        if (b.top >= voiceRect.top && b.top <= voiceRect.bottom + 240 && b.right > voiceRect.left) {
+            if (txt.length > best.length) best = txt
+        }
+    }
+    return best
+}
+
+/**
+ * 长按语音气泡 → 点"转文字" → 等转写文本内联出现 → 读取返回。失败返回 ""。
+ * 微信 8.0.39 的菜单项文字 / 转写节点结构需在真机校准(类比卡片混淆 id)。
+ * @param {object} voiceRect 语音气泡 bounds(含 centerX/centerY)
+ * @returns string
+ */
+function transcribeVoiceMessage(voiceRect) {
+    if (!voiceRect) return ""
+    try {
+        console.log("[vchat] Long press voice @ [" + voiceRect.centerX() + "," + voiceRect.centerY() + "] to transcribe")
+        longClick(voiceRect.centerX(), voiceRect.centerY())
+        sleep(1200)
+
+        // 定位"转文字"菜单项(多选择器 + 重试)
+        let conv = null
+        for (let attempt = 0; attempt < 3; attempt++) {
+            conv = text("转文字").findOne(800)
+                || text("转换为文字").findOne(400)
+                || textContains("转文字").findOne(400)
+                || descContains("转文字").findOne(400)
+            if (conv) break
+            sleep(600)
+        }
+        if (!conv) {
+            console.warn("[vchat] '转文字' menu item not found")
+            back(); sleep(400)
+            return ""
+        }
+        let cb = conv.bounds()
+        click(cb.centerX(), cb.centerY())
+
+        // 轮询等转写结果内联出现(最多约 8s)
+        let transcript = ""
+        for (let i = 0; i < 20; i++) {
+            sleep(400)
+            transcript = readVoiceTranscriptNear(voiceRect)
+            if (transcript) break
+        }
+        console.log("[vchat] voice transcript(" + transcript.length + "): " + transcript.substring(0, 60))
+        return transcript
+    } catch (e) {
+        console.error("[vchat] transcribe voice failed: " + e)
+        return ""
+    }
+}
+
+function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhoto, captureQuotedCardUrl, quotedCardTitle) {
     let rawText = (textParts || []).join(" ").trim()
     let mainText = textParts && textParts.length > 0 ? String(textParts[0] || "").trim() : ""
     let quoteParts = textParts && textParts.length > 1 ? textParts.slice(1) : []
@@ -266,12 +393,36 @@ function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhot
     // 不能用"宽松 hasPhoto + 引用文字为空"兜底——实测该机型几乎每条消息的
     // hasPhoto 都为 true(气泡里有装饰性 ImageView)，会把大量纯文字误判成图片引用，
     // 进而误触发读图、点到头像、回复"读取图片失败"。宁可漏判也不能误判。
-    let isQuotedImage = hasQuoteContext && !!hasStrongPhoto
+    //
+    // 再加一道引用文字判别：群里"引用公众号文章/链接卡片"时，被引内容的封面缩略图同样会
+    // 命中 hasStrongPhoto / h25 缩略图信号，但被引整条不是直接卡片(无 b3o)，isOfficialCard
+    // 漏判，于是被误当成图片去读图、回复"读取图片失败"。区别在引用行文字：
+    //   - 引用图片：文字是占位符"图片"(或为空)
+    //   - 引用文章/链接卡片：文字是文章标题(常带🔗链接图标)
+    // 故仅当引用文字像图片占位、且不含链接标记时，才认定为图片引用。
+    let quotedCardText = String(quotedCardTitle || "").trim()
+    let quoteText = (quoteMeta.text || quotedCardText || "").trim()
+    let quoteRaw = (quoteMeta.raw || quotedCardText || "").trim()
+    let quoteLooksLikeLink = /🔗|https?:\/\//.test(quoteText) || /🔗|https?:\/\//.test(quoteRaw)
+    let quoteLooksLikeImage = !quoteText || /^\[?图片\]?$/.test(quoteText)
+    let isQuotedImage = hasQuoteContext && !!hasStrongPhoto && quoteLooksLikeImage && !quoteLooksLikeLink
+    // quoted-card 只认更强的组合信号：有引用标题节点 + 有缩略图/图片强信号。
+    // 这样会牺牲少量仅暴露纯标题的卡片引用，但能显著降低普通文本/普通引用被误判成卡片。
+    let isQuotedCard = !!quotedCardText && !!hasStrongPhoto && !quoteLooksLikeImage
+
+    if (hasQuoteContext && !!hasStrongPhoto && !isQuotedImage) {
+        console.log("[quote] strong-photo but not image (link/card quote): '" +
+            quoteText.substring(0, 20) + "'")
+    }
+
     let effectiveHasImage = isDirectImage || isQuotedImage
 
     if (isQuotedImage) {
         console.log("[quote] -> image (hasPhoto=" + (!!hasPhoto) + " strong=" + (!!hasStrongPhoto) +
-            " quoteText='" + (quoteMeta.text || "").substring(0, 15) + "')")
+            " quoteText='" + quoteText.substring(0, 15) + "')")
+    }
+    if (isQuotedCard) {
+        console.log("[quote] quoted card node detected (b3g): '" + quotedCardText.substring(0, 20) + "'")
     }
 
     if (isQuotedImage) {
@@ -281,6 +432,16 @@ function buildStructuredMessage(textParts, hasPhoto, captureImage, hasStrongPhot
             text: quoteMeta.text,
             imagePath: null,
             captureImage: captureImage || null
+        }
+    } else if (isQuotedCard) {
+        quote = {
+            type: "text",
+            sender: quoteMeta.sender,
+            text: quotedCardText
+        }
+        quote.card = {
+            title: quotedCardText,
+            captureUrl: function () { return captureQuotedCardUrl ? captureQuotedCardUrl() : null }
         }
     } else if (quoteMeta.sender || quoteMeta.text) {
         quote = {
@@ -1453,7 +1614,7 @@ export default {
      * 获取当前会话中，自上一条“自己发的消息”之后的所有好友消息 (批量)
      * @returns {Array} List of message objects
      */
-    getRecentMessages() {
+    getRecentMessages(isGroupChatHint) {
         let list = className("RecyclerView").findOne(2000)
         if (!list) {
             list = className("ListView").findOne(1000)
@@ -1461,6 +1622,7 @@ export default {
 
         if (!list) return []
 
+        let isGroupChatNow = isGroupChatHint === true || this.isGroupChat()
         let allItems = list.children()
         let messages = []
 
@@ -1490,19 +1652,13 @@ export default {
                 let headRect = head.bounds()
                 let isSelf = headRect.left > device.width / 2
                 if (isSelf) {
+                    messages.selfBoundaryKey = getUiNodeIdentity(item)
                     break
                 }
 
                 let senderName = head.desc().replace("头像", "")
                 let tvs = item.find(className("TextView"))
-                let startIndex = 0
-                if (tvs.size() > 1) {
-                    let firstText = tvs.get(0).text()
-                    let headDesc = head.desc()
-                    if (firstText && headDesc.indexOf(firstText) > -1) {
-                        startIndex = 1
-                    }
-                }
+                let startIndex = getMessageTextStartIndex(tvs, head.desc(), isGroupChatNow, headRect)
 
                 let textParts = []
                 for (let j = startIndex; j < tvs.size(); j++) {
@@ -1521,18 +1677,43 @@ export default {
                 }
 
                 let messageObject = new MessageObject(item)
-                let hasPhoto = messageObject.isPhoto()
+                // 公众号文章卡片(含被引用的卡片)：其封面/缩略图会命中下面的图片信号，
+                // 必须先排除，否则"群里引用/分享的公众号消息"会被误判成图片走读图路径。
+                // 卡片本身由下方 card 字段(标题节点 b3o)处理。
+                let isOfficialCard = messageObject.isOfficialCard()
+                let hasPhoto = messageObject.isPhoto() && !isOfficialCard
+                let quotedImage = messageObject.hasQuotedImage()
                 // 图片引用信号：desc含"图片" 或 存在引用缩略图节点(id h25)。
                 // 不用宽松 hasPhoto，因为头像也会被算成图片导致误判文字消息。
-                let hasStrongPhoto = messageObject.hasStrongPhoto() || messageObject.hasQuotedImage()
+                let hasStrongPhoto = !isOfficialCard && (messageObject.hasStrongPhoto() || quotedImage)
+                let quotedCardTitleNode = messageObject.getQuotedCardTitleNode()
+                let quotedCardTitle = quotedCardTitleNode ? (quotedCardTitleNode.text() || "").trim() : ""
+                let quotedCardRect = quotedCardTitleNode ? quotedCardTitleNode.bounds() : null
                 if (textParts.length === 0 && !hasPhoto) continue
 
                 let cachedQuoteImagePath = null
+                let cachedQuotedCardUrl = null
                 let structured = buildStructuredMessage(textParts, hasPhoto, function () {
                     if (cachedQuoteImagePath !== null) return cachedQuoteImagePath
                     cachedQuoteImagePath = messageObject.savePhotoAndGetPath()
                     return cachedQuoteImagePath
-                }, hasStrongPhoto)
+                }, hasStrongPhoto, function () {
+                    if (cachedQuotedCardUrl !== null) return cachedQuotedCardUrl
+
+                    if (!quotedCardRect || !quotedCardTitle || quotedCardRect.width() < 40 || quotedCardRect.height() < 20) {
+                        console.warn("[quote-card] no clickable title node for quoted card: " + String(quotedCardTitle || "").substring(0, 30))
+                        return null
+                    }
+
+                    console.log("[quote-card] try capture url for quoted title: " + quotedCardTitle.substring(0, 30))
+                    console.log("[quote-card] open quoted card by title: " + quotedCardTitle.substring(0, 30))
+                    cachedQuotedCardUrl = openCardAndCopyUrl(quotedCardRect, quotedCardTitle)
+                    return cachedQuotedCardUrl
+                }, quotedCardTitle)
+
+                if (structured.quote && structured.quote.card) {
+                    console.log("[quote-card] detected quoted card title: " + String(structured.quote.card.title || "").substring(0, 30))
+                }
 
                 // 公众号文章卡片：挂 card 字段，captureUrl 懒加载取原始链接
                 let card = null
@@ -1548,6 +1729,21 @@ export default {
                     }
                 }
 
+                // 语音消息：挂 voice 字段，captureText 懒加载触发微信"转文字"
+                let voice = null
+                let voiceRect = messageObject.isVoice()
+                if (voiceRect) {
+                    let shownTranscript = messageObject.getVoiceTranscript()
+                    voice = {
+                        transcript: shownTranscript,
+                        captureText: function () { return transcribeVoiceMessage(voiceRect) }
+                    }
+                    // 语音气泡里的"时长"不是消息内容：用已显示的转写覆盖，未转写则清空(交 dispatch 触发转写)
+                    structured.text = shownTranscript || ""
+                    structured.rawText = shownTranscript || ""
+                    structured.mainText = shownTranscript || ""
+                }
+
                 messages.unshift({
                     text: structured.text,
                     rawText: structured.rawText,
@@ -1557,7 +1753,9 @@ export default {
                     imageKind: structured.imageKind,
                     captureImage: structured.captureImage,
                     card: card,
+                    voice: voice,
                     sender: senderName,
+                    nodeKey: getUiNodeIdentity(item),
                     rect: item.bounds(),
                     headRect: head.bounds()
                 })
@@ -1572,6 +1770,7 @@ export default {
         if (!list) list = className("ListView").findOne(1000);
         if (!list) return null;
 
+        let isGroupChatNow = this.isGroupChat();
         let allItems = list.children();
         let lastFriendMsg = null;
 
@@ -1596,14 +1795,7 @@ export default {
 
                 // [Fix] In group chats, the first TextView might be the user's nickname.
                 // We try to identify the actual message body.
-                let startIndex = 0;
-                if (tvs.size() > 1) {
-                    let firstText = tvs.get(0).text();
-                    let headDesc = head.desc(); // e.g. "Tink头像"
-                    if (firstText && headDesc.indexOf(firstText) > -1) {
-                        startIndex = 1;
-                    }
-                }
+                let startIndex = getMessageTextStartIndex(tvs, head.desc(), isGroupChatNow, headRect);
 
                 // 过滤掉时间 (通常很小)
                 for (let j = startIndex; j < tvs.size(); j++) {
@@ -1877,56 +2069,51 @@ const MessageObject = function (UIObject) {
     }
 
     /**
-     * 是否是语音消息
-     * 
-     * @returns boolean
-     */
-    this.voiceToText = function () {
-        let toText = this.UIObject.findOne(className("RelativeLayout").depth(21))
-        if (toText) {
-            toText.click()
-            sleep(random(500, 1000))
-            return true
-        }
-        return false
-    }
-
-    /**
-     * 是否是语音消息
-     * 
-     * @returns string
-     */
-    this.getVoiceText = function () {
-        let voiceText = this.UIObject.findOne(className("RelativeLayout").depth(22))
-        if (voiceText) {
-            let rectText = voiceText.bounds()
-            longClick(rectText.centerX(), rectText.centerY())
-            sleep(random(500, 1000))
-            click(rectText.left - 20, rectText.top - 50)
-            sleep(random(500, 1000))
-            let edit = className("EditText").findOnce()
-            if (edit) {
-                edit.click()
-                edit.paste()
-                sleep(random(500, 1000))
-                let edit2 = className("EditText").findOnce()
-                return edit2.text()
-            }
-        }
-        return ""
-    }
-
-    /**
-     * 是否是语音消息
-     * 
-     * @returns boolean
+     * 是否语音消息：是则返回语音气泡可点区域 bounds，否则 null。
+     * 微信 8.0.39 语音气泡带无障碍描述含"语音"，并显示时长(如 3" / 12'')。识别特征需真机校准。
+     *
+     * @returns {object|null}
      */
     this.isVoice = function () {
-        if (this.UIObject) {
-            let voice = this.UIObject.find(descContains("语音"))
-            return voice.nonEmpty()
+        if (!this.UIObject) return null
+        let v = this.UIObject.findOne(descContains("语音"))
+        if (v) {
+            let p = v.parent()
+            return p ? p.bounds() : v.bounds()
         }
-        return false; // Fallback
+        let tvs = this.UIObject.find(className("TextView"))
+        if (tvs && tvs.nonEmpty()) {
+            for (let i = 0; i < tvs.size(); i++) {
+                let t = tvs.get(i)
+                let txt = (t.text() || "").trim()
+                if (/^\d+\s*(''|"|″|秒)$/.test(txt)) {
+                    let p = t.parent()
+                    return p ? p.bounds() : t.bounds()
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * 若语音已"转文字"且转写文本内联显示，读出返回；否则 ""。
+     * 启发式(需真机校准)：本条消息内非时长、非时间戳的最长文本。
+     *
+     * @returns string
+     */
+    this.getVoiceTranscript = function () {
+        if (!this.UIObject) return ""
+        let tvs = this.UIObject.find(className("TextView"))
+        if (!tvs || !tvs.nonEmpty()) return ""
+        let best = ""
+        for (let i = 0; i < tvs.size(); i++) {
+            let txt = (tvs.get(i).text() || "").trim()
+            if (!txt) continue
+            if (/^\d+\s*(''|"|″|秒)$/.test(txt)) continue
+            if (isTimestampText(txt)) continue
+            if (txt.length > best.length) best = txt
+        }
+        return best
     }
 
     this.getImageNodes = function () {
@@ -1991,6 +2178,18 @@ const MessageObject = function (UIObject) {
 
     this.hasQuotedImage = function () {
         return this.getQuotedImageNode() != null
+    }
+
+    /**
+     * 被引用的公众号/链接卡片标题节点。
+     * 你抓到的微信控件值为 b3g；它对应的是"引用区里的卡片标题"，
+     * 与直接分享卡片的 b3o 不是同一个节点。
+     *
+     * @returns UiObject | null
+     */
+    this.getQuotedCardTitleNode = function () {
+        if (!this.UIObject) return null
+        return this.UIObject.findOne(id("b3g"))
     }
 
     /**

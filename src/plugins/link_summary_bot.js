@@ -2,7 +2,10 @@
  * LinkSummaryBot - 公众号文章卡片自动总结
  *
  * 白名单会话(群/私聊)里收到公众号文章卡片时(群里无需 @bot):
- *   取卡片原始链接 → 抓 mp.weixin 正文 → LLM 总结 → 发回该聊天(群里不 @ 人)。
+ *   取卡片原始链接 →
+ *     fetchContent=true  : 本地抓 mp.weixin 正文 → LLM 总结
+ *     fetchContent=false : 直接把 URL 交给后端 LLM/接口总结
+ *   → 发回该聊天(群里不 @ 人)。
  * 卡片检测与取链接由 vchat 提供(ctx.card.captureUrl)。
  */
 function normalizeSessionName(name) {
@@ -31,6 +34,8 @@ function LinkSummaryBot(config) {
     this.config.fetchTimeout = this.config.fetchTimeout || 30000;
     this.config.customHeaders = this.config.customHeaders || {};
     this.config.whitelist = this.config.whitelist || [];
+    // true: 机器人本地抓正文再总结; false: 只把 URL 交给后端
+    this.config.fetchContent = this.config.fetchContent !== false;
     this.config.maxContentChars = this.config.maxContentChars || 6000;
     this.config.summaryPrompt = this.config.summaryPrompt ||
         "你是公众号文章总结助手。请用简洁中文概括文章核心内容，给出 3-6 条要点，不要寒暄、不要复述标题、不要编造原文没有的信息。";
@@ -105,16 +110,25 @@ LinkSummaryBot.prototype.handleAsync = function (ctx, callback) {
 
     var self = this;
     var title = card.title || "";
+    var fetchContent = this.config.fetchContent !== false;
 
-    // 2. 异步抓正文 + 总结 + 回复(网络耗时，不阻塞分发)
+    // 2. 异步总结 + 回复(网络耗时，不阻塞分发)
+    //    fetchContent=true  → 本地抓正文再喂 LLM
+    //    fetchContent=false → 只把 URL 喂给后端(适合后端可自行抓取/解析)
     threads.start(function () {
         try {
-            var content = self.fetchArticleText(url);
-            if (!content) {
-                console.warn("[LinkSummary] Empty article content for: " + url);
-                return;
+            var summary = "";
+            if (fetchContent) {
+                var content = self.fetchArticleText(url);
+                if (!content) {
+                    console.warn("[LinkSummary] Empty article content for: " + url);
+                    return;
+                }
+                summary = self.summarize(title, content, null);
+            } else {
+                console.log("[LinkSummary] fetchContent=false, send URL to backend: " + url);
+                summary = self.summarize(title, null, url);
             }
-            var summary = self.summarize(title, content);
             if (!summary) {
                 console.warn("[LinkSummary] Empty summary");
                 return;
@@ -183,10 +197,22 @@ LinkSummaryBot.prototype.extractText = function (html) {
     return text;
 };
 
-LinkSummaryBot.prototype.summarize = function (title, content) {
+/**
+ * @param {string} title 文章标题
+ * @param {string|null} content 正文(fetchContent=true 时传入)
+ * @param {string|null} url 原文链接(fetchContent=false 时传入)
+ */
+LinkSummaryBot.prototype.summarize = function (title, content, url) {
+    var userContent;
+    if (url) {
+        userContent = "文章标题：" + (title || "") + "\n\n文章链接：\n" + url;
+    } else {
+        userContent = "文章标题：" + (title || "") + "\n\n正文：\n" + (content || "");
+    }
+
     var messages = [
         { role: "system", content: this.config.summaryPrompt },
-        { role: "user", content: "文章标题：" + title + "\n\n正文：\n" + content }
+        { role: "user", content: userContent }
     ];
 
     var res;

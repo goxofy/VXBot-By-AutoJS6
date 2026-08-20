@@ -63,6 +63,7 @@
     "video": {
       "enabled": true,
       "serverUrl": "http://127.0.0.1:8080",
+      "apiUrl": "",
       "command": "下载",
       "maxDownloadMB": 200
     },
@@ -73,6 +74,7 @@
     "linkSummary": {
       "enabled": false,
       "model": "",
+      "fetchContent": true,
       "fetchTimeout": 30000,
       "maxContentChars": 6000,
       "summaryPrompt": ""

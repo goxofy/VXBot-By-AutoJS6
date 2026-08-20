@@ -125,6 +125,7 @@ npm run demo
     "video": {
       "enabled": true,
       "serverUrl": "http://127.0.0.1:8080",
+      "apiUrl": "",
       "command": "下载",
       "maxDownloadMB": 200
     },
@@ -135,6 +136,7 @@ npm run demo
     "linkSummary": {
       "enabled": false,
       "model": "",
+      "fetchContent": true,
       "fetchTimeout": 30000,
       "maxContentChars": 6000,
       "summaryPrompt": ""
@@ -300,9 +302,10 @@ npm run demo
 | 参数 | 类型 | 如何填写 | 可选值 / 默认行为 |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | 是否启用 VideoBot。 | `true` / `false`；默认 `true`（不填也启用）。 |
-| `serverUrl` | `string` | 解析/下载服务地址。 | 默认 `http://127.0.0.1:8080`；例如 `http://127.0.0.1:8080`。 |
+| `serverUrl` | `string` | 解析服务基地址。 | 默认 `http://127.0.0.1:8080`；未填写 `apiUrl` 时自动拼接 `/video/share/url/parse`。 |
+| `apiUrl` | `string` | 视频解析接口完整地址。 | 默认 `""`：按 `serverUrl + "/video/share/url/parse"` 推导；上游接口路径变化时可直接填写新地址。 |
 | `command` | `string` | 视频插件触发指令。 | 默认 `下载`；消息以该命令开头时触发。 |
-| `maxDownloadMB` | `number` | 单个视频下载大小上限，单位 MB。 | 默认 `200`；视频超过上限时直接跳过并回提示。下载已是 okhttp 流式不会 OOM，此项主要防止超大文件占满磁盘 / 浪费带宽。 |
+| `maxDownloadMB` | `number` | 单个视频下载大小上限，单位 MB。 | 默认 `200`；传 `0` 不设大小上限。视频超过上限时直接跳过并回提示；下载已是 okhttp 流式，不会将整个视频读入内存。 |
 
 ### `plugins.image` 配置
 
@@ -313,16 +316,17 @@ npm run demo
 
 ### `plugins.linkSummary` 配置
 
-`LinkSummaryBot` 自动处理**公众号文章卡片**：在白名单会话里(群聊**无需 @bot**)检测到公众号文章卡片后，点开卡片取原文链接(`mp.weixin.qq.com`)、抓正文、用 LLM 总结，再把总结**直接发回**该聊天(群里不 @ 人)。LLM 调用复用 `plugins.openai` 的 `apiKey / baseUrl / model`。
+`LinkSummaryBot` 自动处理**公众号文章卡片**：在白名单会话里(群聊**无需 @bot**)检测到公众号文章卡片后，点开卡片取原文链接(`mp.weixin.qq.com`)，再按 `fetchContent` 决定是**本地抓正文**还是**直接把 URL 交给后端**，最后把总结**直接发回**该聊天(群里不 @ 人)。LLM 调用复用 `plugins.openai` 的 `apiKey / baseUrl / model`。
 
-> 注意：① 仅处理公众号文章卡片(`mp.weixin` 文章)，不处理其它分享卡片。② 取链接依赖微信 8.0.39 的控件 id(`b3o`/`by3` 等)，升级微信可能失效。③ 取链接会**短暂打开文章页再返回**，属正常。④ 已用"卡片标题"去重，同一张卡片 20 分钟内只处理一次。
+> 注意：① 仅处理公众号文章卡片(`mp.weixin` 文章)，不处理其它分享卡片。② 取链接依赖微信 8.0.39 的控件 id(`b3o`/`by3` 等)，升级微信可能失效。③ 取链接会**短暂打开文章页再返回**，属正常（即使 `fetchContent=false` 也要先拿到 URL）。④ 已用"卡片标题"去重，同一张卡片 20 分钟内只处理一次。⑤ `fetchContent=false` 时，后端需要自己能访问/解析该 URL（例如带网页抓取能力的接口）；普通纯文本模型通常应保持 `true`。
 
 | 参数 | 类型 | 如何填写 | 可选值 / 默认行为 |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `boolean` | 是否启用 LinkSummaryBot。 | `true` / `false`；默认 `false`（需显式开启）。 |
 | `model` | `string` | 总结使用的模型名。 | 默认 `""`：回退到 `plugins.openai.model`。 |
-| `fetchTimeout` | `number` | 抓取文章网页的超时，单位毫秒。 | 默认 `30000`。 |
-| `maxContentChars` | `number` | 喂给模型的正文最大字符数(超出截断)。 | 默认 `6000`。 |
+| `fetchContent` | `boolean` | 是否由机器人本地抓取公众号正文再交给后端。 | `true` / `false`；默认 `true`：`summaryPrompt + 标题 + 正文`；`false`：`summaryPrompt + 标题 + URL`，不本地抓正文。 |
+| `fetchTimeout` | `number` | 抓取文章网页的超时，单位毫秒。 | 默认 `30000`；仅 `fetchContent=true` 时生效。 |
+| `maxContentChars` | `number` | 喂给模型的正文最大字符数(超出截断)。 | 默认 `6000`；仅 `fetchContent=true` 时生效。 |
 | `summaryPrompt` | `string` | 总结用的系统提示词。 | 默认 `""`：使用内置默认提示词。 |
 | `apiKey` / `baseUrl` / `endpoint` | `string` | 可选，单独指定总结后端。 | 留空时回退到 `plugins.openai` 对应值。 |
 

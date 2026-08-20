@@ -9,9 +9,29 @@ function VideoBot(config) {
     this.apiUrl = this.config.apiUrl || (baseUrl + "/video/share/url/parse");
     this.triggerCommand = this.config.command || "下载";
 
-    // 下载大小上限(MB)，默认 200MB。okhttp 已是流式不会 OOM，此处主要防止超大文件占满磁盘/浪费带宽。
-    this.maxDownloadBytes = (this.config.maxDownloadMB || 200) * 1024 * 1024;
+    // 下载大小上限(MB)，默认 200MB。仅传 0 时不设上限。
+    var maxDownloadMB = this.config.maxDownloadMB;
+    if (maxDownloadMB === undefined || maxDownloadMB === null || maxDownloadMB === "") {
+        maxDownloadMB = 200;
+    } else {
+        maxDownloadMB = Number(maxDownloadMB);
+        if (!isFinite(maxDownloadMB) || maxDownloadMB < 0) {
+            console.warn("[VideoBot] Invalid maxDownloadMB, use default 200MB: " + this.config.maxDownloadMB);
+            maxDownloadMB = 200;
+        }
+    }
+    this.maxDownloadBytes = maxDownloadMB * 1024 * 1024;
 }
+
+VideoBot.prototype.isDouyinVideoUrl = function (url) {
+    try {
+        var host = String(new java.net.URL(url).getHost() || "").toLowerCase();
+        var suffix = ".douyinvod.com";
+        return host === "douyinvod.com" || host.slice(-suffix.length) === suffix;
+    } catch (e) {
+        return false;
+    }
+};
 
 VideoBot.prototype.safeClose = function (closeable) {
     if (!closeable || !closeable.close) return;
@@ -82,7 +102,12 @@ VideoBot.prototype.downloadVideoWithRetry = function (realUrl, savePath) {
         try {
             console.log("[VideoBot] (okhttp) Download attempt " + attempt + "/" + maxAttempts + ": " + realUrl);
 
-            var request = new Request.Builder().url(realUrl).build();
+            var requestBuilder = new Request.Builder().url(realUrl);
+            // 抖音 CDN 会校验来源页；仅对 douyinvod 域名补 Referer，避免影响其它平台。
+            if (this.isDouyinVideoUrl(realUrl)) {
+                requestBuilder.header("Referer", "https://www.douyin.com/");
+            }
+            var request = requestBuilder.build();
             response = client.newCall(request).execute();
 
             var code = response.code();
@@ -243,7 +268,7 @@ VideoBot.prototype.handleAsync = function (ctx, callback) {
                 console.log("[VideoBot] Extracted Basic Auth credentials for user: " + user);
             }
 
-            requestUrl += "?url=" + encodeURIComponent(content);
+            requestUrl += (requestUrl.indexOf("?") === -1 ? "?" : "&") + "url=" + encodeURIComponent(content);
             console.log("[VideoBot] Final Request URL: " + requestUrl);
 
             var res = http.get(requestUrl, {

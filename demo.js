@@ -107,7 +107,9 @@ var videoConfig = pluginsConfig.video || {};
 if (videoConfig.enabled !== false) {
     bot.register(new VideoBot({
         serverUrl: videoConfig.serverUrl || "http://127.0.0.1:8080",
-        command: videoConfig.command || "下载"
+        apiUrl: videoConfig.apiUrl || "",
+        command: videoConfig.command || "下载",
+        maxDownloadMB: videoConfig.maxDownloadMB
     }));
     console.log("VideoBot 已注册, 触发指令: " + (videoConfig.command || "下载"));
 }
@@ -118,6 +120,7 @@ var openaiConfig = pluginsConfig.openai || {};
 // [LinkSummaryBot] 公众号文章卡片自动总结 (复用 openai 的 key/baseUrl/model)
 var linkSummaryConfig = pluginsConfig.linkSummary || {};
 if (linkSummaryConfig.enabled === true) {
+    var linkFetchContent = linkSummaryConfig.fetchContent !== false;
     bot.register(new LinkSummaryBot({
         enabled: true,
         apiKey: linkSummaryConfig.apiKey || openaiConfig.apiKey || "",
@@ -125,13 +128,14 @@ if (linkSummaryConfig.enabled === true) {
         endpoint: linkSummaryConfig.endpoint || openaiConfig.endpoint || "",
         model: linkSummaryConfig.model || openaiConfig.model || "gpt-3.5-turbo",
         requestTimeout: linkSummaryConfig.requestTimeout || openaiConfig.requestTimeout || 90000,
+        fetchContent: linkFetchContent,
         fetchTimeout: linkSummaryConfig.fetchTimeout || 30000,
         customHeaders: linkSummaryConfig.customHeaders || openaiConfig.customHeaders || {},
         whitelist: WHITELIST,
         maxContentChars: linkSummaryConfig.maxContentChars || 6000,
         summaryPrompt: linkSummaryConfig.summaryPrompt || ""
     }));
-    console.log("LinkSummaryBot 已注册");
+    console.log("LinkSummaryBot 已注册, fetchContent: " + (linkFetchContent ? "开启(本地抓正文)" : "关闭(仅传 URL)"));
 }
 
 if (openaiConfig.enabled !== false) {
